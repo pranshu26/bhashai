@@ -14,14 +14,20 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
-    "db:migrate": "pnpm --filter @bhashai/db prisma:migrate",
-    "db:generate": "pnpm --filter @bhashai/db prisma:generate",
-    "infra:up": "docker compose -f infra/docker-compose.yml up -d postgres redis",
-    "infra:down": "docker compose -f infra/docker-compose.yml down"
+    "db:generate": "pnpm --filter @bhashai/db exec prisma generate",
+    "db:validate": "dotenv -e .env -- pnpm --filter @bhashai/db exec prisma validate",
+    "db:migrate": "dotenv -e .env -- pnpm --filter @bhashai/db exec prisma migrate dev",
+    "db:seed": "dotenv -e .env -- pnpm --filter @bhashai/db exec tsx prisma/seed.ts",
+    "db:studio": "dotenv -e .env -- pnpm --filter @bhashai/db exec prisma studio",
+    "infra:up": "docker compose --env-file .env -f infra/docker-compose.yml up -d postgres redis",
+    "infra:down": "docker compose --env-file .env -f infra/docker-compose.yml down"
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
+    "dotenv-cli": "^8.0.0",
     "prettier": "^3.4.2",
     "turbo": "^2.5.0",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
   }
 }

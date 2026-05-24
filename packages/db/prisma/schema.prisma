@@ -1,0 +1,325 @@
+// BhashAI database schema. See docs/ARCHITECTURE.md §5. Money is integer micro-USD.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+enum UserRole {
+  USER
+  ADMIN
+  REVIEWER
+}
+
+enum JobStatus {
+  PENDING
+  UPLOADED
+  EXTRACTING
+  ANALYZING
+  CHUNKING
+  TRANSLATING
+  POST_EDITING
+  QA
+  RECONSTRUCTING
+  EXPORTING
+  COMPLETED
+  PARTIALLY_COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum JobStage {
+  CREATED
+  UPLOAD
+  EXTRACT
+  ANALYZE
+  CHUNK
+  TRANSLATE
+  POST_EDIT
+  QA
+  RECONSTRUCT
+  EXPORT
+  DONE
+}
+
+enum ChunkStatus {
+  PENDING
+  TRANSLATING
+  TRANSLATED
+  POST_EDITING
+  POST_EDITED
+  QA_PENDING
+  QA_PASSED
+  QA_FLAGGED
+  FAILED
+  APPROVED
+}
+
+enum DocType {
+  TXT
+  DOCX
+  PDF_TEXT
+  PDF_SCANNED
+  PDF_MIXED
+}
+
+enum OutputMode {
+  REFLOWED
+  LAYOUT_PRESERVED
+  BILINGUAL
+}
+
+enum Tone {
+  FORMAL
+  INFORMAL
+  EDUCATIONAL
+  CONVERSATIONAL
+  TECHNICAL
+  LITERARY
+  GOVERNMENT
+  ACADEMIC
+}
+
+enum AssetType {
+  IMAGE
+  GRAPH
+  DIAGRAM
+  TABLE
+  FOOTNOTE
+  CAPTION
+  EQUATION
+  HEADER
+  FOOTER
+  PAGE_NUMBER
+  CHART
+}
+
+enum EngineKind {
+  MOCK
+  INDICTRANS2
+  AMAZON_TRANSLATE
+  GOOGLE_ADVANCED
+  LLM
+  GLOSSARY_RULE
+  TRANSLATION_MEMORY
+}
+
+// ---------- Core ----------
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  role         UserRole @default(USER)
+  planId       String   @default("free")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  jobs       TranslationJob[]
+  glossaries TranslationGlossaryTerm[]
+  references TranslationReferenceDocument[]
+}
+
+model TranslationJob {
+  id                    String     @id @default(cuid())
+  userId                String
+  user                  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceLanguage        String     @default("en")
+  targetLanguage        String
+  tone                  Tone       @default(FORMAL)
+  mode                  String     @default("DOCUMENT")
+  docType               DocType?
+  outputMode            OutputMode @default(REFLOWED)
+  qualityPriority       Boolean    @default(true)
+  specialInstructions   String?
+  status                JobStatus  @default(PENDING)
+  currentStage          JobStage   @default(CREATED)
+  progressPercentage    Int        @default(0)
+  totalChunks           Int        @default(0)
+  completedChunks       Int        @default(0)
+  failedChunks          Int        @default(0)
+  originalFileUrl       String?
+  originalFileName      String?
+  extractedTextUrl      String?
+  translatedFileUrl     String?
+  guideJson             Json?
+  estimatedCostMicroUsd Int?
+  actualCostMicroUsd    Int        @default(0)
+  errorMessage          String?
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+  completedAt           DateTime?
+
+  chunks        TranslationChunk[]
+  assets        DocumentAsset[]
+  qaReport      QAReport?
+  engineRuns    TranslationEngineRun[]
+  exports       ExportedFile[]
+  events        JobEventLog[]
+  glossaryTerms TranslationGlossaryTerm[]
+  references    TranslationReferenceDocument[]
+
+  @@index([userId, status])
+}
+
+model TranslationChunk {
+  id                String         @id @default(cuid())
+  jobId             String
+  job               TranslationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  chapterIndex      Int            @default(0)
+  sectionTitle      String?
+  chunkIndex        Int
+  sourceText        String
+  translatedText    String?
+  rawTranslatedText String?
+  status            ChunkStatus    @default(PENDING)
+  retryCount        Int            @default(0)
+  engineUsed        EngineKind?
+  qaScore           Int?
+  qaFlags           Json?
+  tokenCount        Int?
+  prevContext       String?
+  errorMessage      String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  engineRuns TranslationEngineRun[]
+
+  @@unique([jobId, chunkIndex])
+  @@index([jobId, status])
+}
+
+model TranslationGlossaryTerm {
+  id             String          @id @default(cuid())
+  userId         String?
+  user           User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId          String?
+  job            TranslationJob? @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  targetLanguage String
+  sourceTerm     String
+  targetTerm     String
+  doNotTranslate Boolean         @default(false)
+  caseSensitive  Boolean         @default(false)
+  notes          String?
+  createdAt      DateTime        @default(now())
+
+  @@index([userId, targetLanguage])
+  @@index([jobId])
+}
+
+model TranslationReferenceDocument {
+  id             String          @id @default(cuid())
+  userId         String?
+  user           User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId          String?
+  job            TranslationJob? @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  targetLanguage String
+  title          String?
+  fileUrl        String
+  styleGuideJson Json?
+  createdAt      DateTime        @default(now())
+}
+
+model TranslationMemoryEntry {
+  id              String   @id @default(cuid())
+  userId          String?
+  targetLanguage  String
+  domain          String?
+  sourceText      String
+  targetText      String
+  sourceHash      String
+  quality         Int      @default(0)
+  approvedByHuman Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  @@unique([sourceHash, targetLanguage])
+  @@index([targetLanguage, domain])
+}
+
+model DocumentAsset {
+  id                    String         @id @default(cuid())
+  jobId                 String
+  job                   TranslationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  assetType             AssetType
+  originalPageNumber    Int?
+  originalBoundingBox   Json?
+  fileUrl               String?
+  captionSourceText     String?
+  captionTranslatedText String?
+  referenceId           String?
+  ocrConfidence         Float?
+  createdAt             DateTime       @default(now())
+
+  @@index([jobId, assetType])
+}
+
+model QAReport {
+  id                   String         @id @default(cuid())
+  jobId                String         @unique
+  job                  TranslationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  overallScore         Int
+  pass                 Boolean
+  chunksTranslated     Int
+  chunksFlagged        Int
+  glossaryViolations   Int            @default(0)
+  numberMismatches     Int            @default(0)
+  untranslatedWarnings Int            @default(0)
+  layoutWarnings       Int            @default(0)
+  ocrWarnings          Int            @default(0)
+  imageTextWarnings    Int            @default(0)
+  reportJson           Json
+  recommendedReview    Json
+  createdAt            DateTime       @default(now())
+}
+
+model TranslationEngineRun {
+  id               String            @id @default(cuid())
+  jobId            String
+  job              TranslationJob    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  chunkId          String?
+  chunk            TranslationChunk? @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+  engine           EngineKind
+  promptVersion    String?
+  inputText        String?
+  rawOutput        String?
+  postEditedOutput String?
+  latencyMs        Int?
+  costMicroUsd     Int?
+  qaFlags          Json?
+  success          Boolean           @default(true)
+  errorMessage     String?
+  createdAt        DateTime          @default(now())
+
+  @@index([jobId, engine])
+  @@index([chunkId])
+}
+
+model ExportedFile {
+  id         String         @id @default(cuid())
+  jobId      String
+  job        TranslationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  outputMode OutputMode
+  format     String
+  fileUrl    String
+  sizeBytes  Int?
+  isPartial  Boolean        @default(false)
+  createdAt  DateTime       @default(now())
+}
+
+model JobEventLog {
+  id        String         @id @default(cuid())
+  jobId     String
+  job       TranslationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  stage     JobStage
+  event     String
+  level     String         @default("info")
+  message   String?
+  dataJson  Json?
+  createdAt DateTime       @default(now())
+
+  @@index([jobId, createdAt])
+}
