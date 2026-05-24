@@ -1,0 +1,22 @@
+{
+  "name": "@bhashai/worker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "dev": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@bhashai/db": "workspace:*",
+    "@bhashai/engines": "workspace:*",
+    "@bhashai/parsing": "workspace:*",
+    "@bhashai/shared": "workspace:*",
+    "@bhashai/storage": "workspace:*",
+    "bullmq": "^5.34.0",
+    "dotenv": "^16.4.7",
+    "ioredis": "^5.4.1",
+    "zod": "^3.25.0"
+  }
+}

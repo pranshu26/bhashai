@@ -82,6 +82,36 @@ importers:
         specifier: ^1.4.12
         version: 1.4.13
 
+  apps/worker:
+    dependencies:
+      '@bhashai/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@bhashai/engines':
+        specifier: workspace:*
+        version: link:../../packages/engines
+      '@bhashai/parsing':
+        specifier: workspace:*
+        version: link:../../packages/parsing
+      '@bhashai/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@bhashai/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
+      bullmq:
+        specifier: ^5.34.0
+        version: 5.77.2
+      dotenv:
+        specifier: ^16.4.7
+        version: 16.6.1
+      ioredis:
+        specifier: ^5.4.1
+        version: 5.10.1
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+
   packages/db:
     dependencies:
       '@prisma/client':

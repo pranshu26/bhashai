@@ -26,7 +26,9 @@ from langs import to_flores
 
 MODEL_NAME = os.environ.get("INDICTRANS_MODEL", "ai4bharat/indictrans2-en-indic-dist-200M")
 MAX_LEN = int(os.environ.get("INDICTRANS_MAX_LEN", "256"))
-BATCH = int(os.environ.get("INDICTRANS_BATCH", "8"))
+BATCH = int(os.environ.get("INDICTRANS_BATCH", "16"))
+# Greedy (1) is ~5x faster than 5-beam and IndicTrans2 quality stays strong; raise for max quality.
+NUM_BEAMS = int(os.environ.get("INDICTRANS_NUM_BEAMS", "1"))
 MAX_UNIT_CHARS = int(os.environ.get("INDICTRANS_MAX_UNIT_CHARS", "280"))
 DEVICE = (
     "cuda"
@@ -121,7 +123,7 @@ class _Engine:
                 use_cache=False,  # IndicTrans2 remote code uses legacy tuple cache; incompatible
                 min_length=0,     # with transformers >=4.44 Cache. Disabling avoids the mismatch.
                 max_length=MAX_LEN,
-                num_beams=5,
+                num_beams=NUM_BEAMS,
                 num_return_sequences=1,
             )
         decoded = self.tok.batch_decode(
