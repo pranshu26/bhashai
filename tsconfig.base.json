@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "declaration": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@bhashai/shared": ["packages/shared/src"],
+      "@bhashai/shared/*": ["packages/shared/src/*"],
+      "@bhashai/db": ["packages/db/src"],
+      "@bhashai/storage": ["packages/storage/src"],
+      "@bhashai/engines": ["packages/engines/src"],
+      "@bhashai/parsing": ["packages/parsing/src"],
+      "@bhashai/glossary": ["packages/glossary/src"],
+      "@bhashai/qa": ["packages/qa/src"],
+      "@bhashai/reconstruct": ["packages/reconstruct/src"]
+    }
+  },
+  "exclude": ["node_modules", "dist", ".next"]
+}

@@ -1,0 +1,78 @@
+# BhashAI — local + single-box EC2 topology.
+# `docker compose up postgres redis` works today. App services build in Phase 1
+# (their Dockerfiles land with apps/* ). parser/indictrans land in Phase 2/3.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bhashai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bhashai}
+      POSTGRES_DB: ${POSTGRES_DB:-bhashai}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bhashai}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: { context: .., dockerfile: apps/api/Dockerfile }
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-bhashai}:${POSTGRES_PASSWORD:-bhashai}@postgres:5432/${POSTGRES_DB:-bhashai}
+      REDIS_URL: redis://redis:6379
+    ports: ["3001:3001"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    profiles: ["app"]
+    restart: unless-stopped
+
+  worker:
+    build: { context: .., dockerfile: apps/worker/Dockerfile }
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-bhashai}:${POSTGRES_PASSWORD:-bhashai}@postgres:5432/${POSTGRES_DB:-bhashai}
+      REDIS_URL: redis://redis:6379
+      PARSER_SERVICE_URL: http://parser:8000
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    profiles: ["app"]
+    restart: unless-stopped
+
+  web:
+    build: { context: .., dockerfile: apps/web/Dockerfile }
+    env_file: ../.env
+    ports: ["3000:3000"]
+    depends_on: ["api"]
+    profiles: ["app"]
+    restart: unless-stopped
+
+  parser:
+    build: { context: ../services/parser }
+    ports: ["8000:8000"]
+    profiles: ["app"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

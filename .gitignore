@@ -1,0 +1,38 @@
+# deps
+node_modules/
+.pnpm-store/
+
+# build
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# turbo
+.turbo/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+google-credentials*.json
+
+# local dev storage (STORAGE_DRIVER=local)
+.data/
+
+# logs
+*.log
+logs/
+
+# test
+coverage/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os
+.DS_Store
