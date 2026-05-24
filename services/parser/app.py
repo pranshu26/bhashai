@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 import overlay
+import llm_postedit
 
 INDICTRANS_URL = os.environ.get("INDICTRANS_SERVICE_URL", "http://localhost:8001")
 
@@ -30,6 +31,7 @@ class TranslatePdfReq(BaseModel):
     target: str
     pages: str = ""
     ocr: bool | None = None  # None => use ENABLE_OCR env default
+    post_edit: bool | None = None  # None => on when an LLM key is configured
 
 
 ENABLE_OCR = os.environ.get("ENABLE_OCR", "false").lower() in ("local", "tesseract", "true", "textract")
@@ -56,7 +58,10 @@ def translate_pdf(req: TranslatePdfReq) -> dict:
         raise HTTPException(404, f"not found: {req.in_path}")
     os.makedirs(os.path.dirname(req.out_path) or ".", exist_ok=True)
     ocr = ENABLE_OCR if req.ocr is None else req.ocr
+    post_edit = llm_postedit.is_enabled() if req.post_edit is None else req.post_edit
     try:
-        return overlay.translate_pdf(req.in_path, req.out_path, req.target, INDICTRANS_URL, req.pages, ocr=ocr)
+        return overlay.translate_pdf(
+            req.in_path, req.out_path, req.target, INDICTRANS_URL, req.pages, ocr=ocr, post_edit=post_edit
+        )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, str(e))

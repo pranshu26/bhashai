@@ -145,7 +145,17 @@ def _sample_bg(pix, rect, zoom):
         return (1, 1, 1)
 
 
-def ocr_translate_page(page, target, service_url, font_path, min_conf=55):
+def apply_postedit(sources, translations, target):
+    """Refine drafts via the LLM post-edit layer; safe no-op fallback to drafts."""
+    try:
+        from llm_postedit import post_edit_batch
+
+        return post_edit_batch(list(zip(sources, translations)), target)
+    except Exception:
+        return translations
+
+
+def ocr_translate_page(page, target, service_url, font_path, min_conf=55, post_edit=False):
     """OCR text baked into an image page; translate high-confidence lines and overlay them.
     Low-confidence regions are left untouched and flagged (never silently wrong)."""
     import io
@@ -192,6 +202,8 @@ def ocr_translate_page(page, target, service_url, font_path, min_conf=55):
         translations = translate_via_service([t for _, t in todo], target, service_url)
     except Exception:
         return stats
+    if post_edit:
+        translations = apply_postedit([t for _, t in todo], translations, target)
     page.insert_font(fontname="tgt", fontfile=font_path)
     page_h = page.rect.height
     for (rect, _src), tr in zip(todo, translations):
@@ -203,7 +215,7 @@ def ocr_translate_page(page, target, service_url, font_path, min_conf=55):
     return stats
 
 
-def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_path=None, ocr=False):
+def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_path=None, ocr=False, post_edit=False):
     """Translate a PDF in place (layout-preserved). Returns a report dict."""
     font_path = font_path or resolve_font(target)
     doc = fitz.open(in_path)
@@ -228,7 +240,7 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
         if not blocks:
             report["imageTextPages"] += 1
             if ocr:
-                st = ocr_translate_page(page, target, service_url, font_path)
+                st = ocr_translate_page(page, target, service_url, font_path, post_edit=post_edit)
                 info["ocr"] = st
                 report["ocrLinesTranslated"] += st["ocrTranslated"]
                 report["ocrLowConf"] += st["ocrLowConf"]
@@ -251,6 +263,8 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
             translations = src
             info["translateError"] = last_err[:200]
             report["failedPages"] += 1
+        elif post_edit:
+            translations = apply_postedit(src, translations, target)
 
         for rect, _t, _s, _c in blocks:
             page.add_redact_annot(rect)
