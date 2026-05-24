@@ -75,8 +75,10 @@ class _Engine:
         if self.model is not None:
             return
         self.tok = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        # fp16 on CUDA: ~2x faster + halves VRAM (1B fits a T4 easily). fp32 on CPU/MPS.
+        dtype = torch.float16 if DEVICE == "cuda" else torch.float32
         self.model = (
-            AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, trust_remote_code=True)
+            AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME, trust_remote_code=True, torch_dtype=dtype)
             .to(DEVICE)
             .eval()
         )
