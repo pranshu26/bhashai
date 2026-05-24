@@ -27,7 +27,8 @@ export async function processJob(jobId: string): Promise<void> {
 
   try {
     const docType = detectDocType(job.originalFileName ?? '');
-    await setJob(jobId, { docType, status: 'EXTRACTING', currentStage: 'EXTRACT', progressPercentage: 5 });
+    // clear any stale error from a prior failed attempt (BullMQ retries re-run this)
+    await setJob(jobId, { docType, status: 'EXTRACTING', currentStage: 'EXTRACT', progressPercentage: 5, errorMessage: null });
     await event(jobId, 'EXTRACT', 'extract.completed', `docType=${docType}`);
 
     if (docType.startsWith('PDF')) {
