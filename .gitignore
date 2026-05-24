@@ -21,9 +21,10 @@ google-credentials*.json
 # local dev storage (STORAGE_DRIVER=local)
 .data/
 
-# large sample binaries (kept locally; documented in samples/README.md)
+# large sample binaries + generated outputs (kept locally; see samples/README.md)
 samples/*.pdf
 samples/*.docx
+samples/out/
 
 # logs
 *.log
