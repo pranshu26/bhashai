@@ -1,0 +1,9 @@
+# BhashAI parser-service (Python FastAPI). PDF/DOCX extraction + layout-preserved render + OCR.
+pymupdf>=1.27          # text spans + coords + fonts, image extraction, layout-preserved overlay
+pdfplumber>=0.11       # table extraction
+python-docx>=1.1       # DOCX structural parse/write
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pillow>=11
+pydantic>=2.9
+# OCR (enabled via ENABLE_OCR): pytesseract / amazon-textract added in Phase 2
