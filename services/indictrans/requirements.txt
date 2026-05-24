@@ -1,0 +1,9 @@
+# BhashAI IndicTrans2 (AI4Bharat) translation service.
+# transformers pinned <5: IndicTransToolkit + the model's remote code use the 4.x API.
+torch>=2.4
+transformers>=4.44,<5
+sentencepiece
+IndicTransToolkit
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
