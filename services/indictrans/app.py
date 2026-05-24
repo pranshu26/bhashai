@@ -9,6 +9,7 @@ Model is lazy-loaded on first request. Default is the distilled 200M en->indic m
 (CPU-practical); override with INDICTRANS_MODEL (e.g. ai4bharat/indictrans2-en-indic-1B on GPU).
 """
 import os
+import re
 from typing import List
 
 import torch
@@ -25,11 +26,41 @@ from langs import to_flores
 
 MODEL_NAME = os.environ.get("INDICTRANS_MODEL", "ai4bharat/indictrans2-en-indic-dist-200M")
 MAX_LEN = int(os.environ.get("INDICTRANS_MAX_LEN", "256"))
+BATCH = int(os.environ.get("INDICTRANS_BATCH", "8"))
+MAX_UNIT_CHARS = int(os.environ.get("INDICTRANS_MAX_UNIT_CHARS", "280"))
 DEVICE = (
     "cuda"
     if torch.cuda.is_available()
     else ("mps" if torch.backends.mps.is_available() else "cpu")
 )
+
+_SENT_RE = re.compile(r"[^.?!।]*[.?!।]+|\S[^.?!।]*$")
+
+
+def _split_units(text: str) -> List[str]:
+    """Split text into sentence-sized units (<= MAX_UNIT_CHARS) so nothing is truncated."""
+    text = text.strip()
+    if not text:
+        return []
+    parts = [p.strip() for p in _SENT_RE.findall(text) if p.strip()] or [text]
+    units: List[str] = []
+    cur = ""
+    for p in parts:
+        if cur and len(cur) + len(p) + 1 > MAX_UNIT_CHARS:
+            units.append(cur)
+            cur = p
+        else:
+            cur = f"{cur} {p}".strip() if cur else p
+    if cur:
+        units.append(cur)
+    # hard-cap any unit with no sentence breaks
+    capped: List[str] = []
+    for u in units:
+        if len(u) <= MAX_UNIT_CHARS * 2:
+            capped.append(u)
+        else:
+            capped.extend(u[i : i + MAX_UNIT_CHARS] for i in range(0, len(u), MAX_UNIT_CHARS))
+    return capped
 
 
 class _Engine:
@@ -50,11 +81,34 @@ class _Engine:
         self.ip = IndicProcessor(inference=True)
 
     def translate(self, texts: List[str], src: str, tgt: str) -> List[str]:
+        """Translate each input fully: long inputs are split into sentence units (avoids the
+        256-token truncation that would drop content), translated in bounded sub-batches
+        (keeps MPS/GPU memory in check), then reassembled per input."""
         self.load()
         src_f, tgt_f = to_flores(src), to_flores(tgt)
-        batch = self.ip.preprocess_batch(texts, src_lang=src_f, tgt_lang=tgt_f)
+
+        units: List[str] = []
+        spans = []  # (start, end) slice of units belonging to each input text
+        for t in texts:
+            sents = _split_units(t)
+            spans.append((len(units), len(units) + len(sents)))
+            units.extend(sents)
+
+        translated: List[str] = []
+        for i in range(0, len(units), BATCH):
+            translated.extend(self._generate(units[i : i + BATCH], src_f, tgt_f))
+
+        out = []
+        for start, end in spans:
+            out.append(" ".join(translated[start:end]).strip())
+        return out
+
+    def _generate(self, batch: List[str], src_f: str, tgt_f: str) -> List[str]:
+        if not batch:
+            return []
+        pre = self.ip.preprocess_batch(batch, src_lang=src_f, tgt_lang=tgt_f)
         inputs = self.tok(
-            batch,
+            pre,
             truncation=True,
             padding="longest",
             return_tensors="pt",

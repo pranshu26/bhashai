@@ -61,10 +61,40 @@ def extract_text_blocks(page):
     return blocks
 
 
+def place_text(page, rect, text, fs_start, fs_min, rgb, page_h):
+    """Draw `text` in `rect`, guaranteeing it is shown (insert_textbox is atomic — it draws
+    nothing on overflow). Strategy: shrink font in the original box; if still no fit, grow the
+    box downward at min font until it fits. Returns (fontsize, grew) where grew=True flags that
+    the text spilled past its original box."""
+    fs = fs_start
+    while fs >= fs_min:
+        box = fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1)
+        if page.insert_textbox(box, text, fontname="deva", fontsize=fs, color=rgb, align=0) >= 0:
+            return fs, False
+        fs -= 0.5
+    y1 = rect.y1
+    while y1 < page_h - 2:
+        y1 = min(page_h - 2, y1 + max(14.0, rect.height * 0.5))
+        box = fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, y1)
+        if page.insert_textbox(box, text, fontname="deva", fontsize=fs_min, color=rgb, align=0) >= 0:
+            return fs_min, True
+    box = fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, page_h - 2)
+    for fs2 in (fs_min, 3.5, 3.0):
+        if page.insert_textbox(box, text, fontname="deva", fontsize=fs2, color=rgb, align=0) >= 0:
+            return fs2, True
+    return fs_min, True
+
+
 def overlay(in_pdf, out_pdf, target, font_path, pages_spec, engine, url):
     doc = fitz.open(in_pdf)
     pages = parse_pages(pages_spec, doc.page_count)
-    report = {"pages": [], "blocks_translated": 0, "overflow_blocks": 0, "image_text_pages": 0}
+    report = {
+        "pages": [],
+        "blocks_translated": 0,
+        "overflow_blocks": 0,
+        "image_text_pages": 0,
+        "failed_pages": 0,
+    }
 
     for pi in pages:
         page = doc[pi]
@@ -76,11 +106,22 @@ def overlay(in_pdf, out_pdf, target, font_path, pages_spec, engine, url):
             report["pages"].append({**page_info, "note": "no text layer (image/graphic page) — left as-is"})
             continue
 
-        translations = (
-            translate_mock([t for _, t, _, _ in blocks], target)
-            if engine == "mock"
-            else translate_service([t for _, t, _, _ in blocks], target, url)
-        )
+        src_texts = [t for _, t, _, _ in blocks]
+        if engine == "mock":
+            translations = translate_mock(src_texts, target)
+        else:
+            translations, last_err = None, ""
+            for _attempt in range(2):
+                try:
+                    translations = translate_service(src_texts, target, url)
+                    break
+                except Exception as ex:  # noqa: BLE001
+                    last_err = str(ex)
+            if translations is None:
+                # don't abort the document: keep original text on this page and flag it
+                translations = src_texts
+                page_info["translate_error"] = last_err[:200]
+                report["failed_pages"] += 1
 
         # 1) remove only the original text, keep images + vector art
         for rect, _, _, _ in blocks:
@@ -92,20 +133,10 @@ def overlay(in_pdf, out_pdf, target, font_path, pages_spec, engine, url):
 
         # 2) embed the target-script font and re-insert translations with auto-fit
         page.insert_font(fontname="deva", fontfile=font_path)
+        page_h = page.rect.height
         for (rect, _src, size, rgb), translated in zip(blocks, translations):
-            box = rect + (-1, -1, 1, 1)
-            fs = max(6.0, size)
-            placed = False
-            while fs >= 5.0:
-                leftover = page.insert_textbox(
-                    box, translated, fontname="deva", fontsize=fs, color=rgb, align=0
-                )
-                if leftover >= 0:
-                    placed = True
-                    break
-                fs -= 0.5
-            if not placed:
-                page.insert_textbox(box, translated, fontname="deva", fontsize=5, color=rgb, align=0)
+            _fs, grew = place_text(page, rect, translated, max(6.0, size), 4.0, rgb, page_h)
+            if grew:
                 page_info["overflow"] += 1
                 report["overflow_blocks"] += 1
             report["blocks_translated"] += 1
