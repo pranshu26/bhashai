@@ -1,0 +1,16 @@
+{
+  "name": "@bhashai/engines",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@bhashai/shared": "workspace:*",
+    "@aws-sdk/client-translate": "^3.717.0"
+  }
+}
