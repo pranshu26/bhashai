@@ -41,3 +41,8 @@ venv/
 
 # os
 .DS_Store
+
+# AWS credential CSVs — never commit
+*accessKeys*.csv
+*_accessKeys.csv
+rootkey.csv

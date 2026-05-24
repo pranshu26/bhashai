@@ -15,8 +15,8 @@ sudo apt-get install -y --no-install-recommends \
   ca-certificates curl git nginx \
   python3-venv python3-pip \
   tesseract-ocr tesseract-ocr-hin tesseract-ocr-eng \
-  libraqm0 fonts-noto-core fonts-indic \
-  docker.io docker-compose-plugin
+  libraqm0 fonts-noto-core fonts-indic fonts-noto fontconfig \
+  docker.io docker-compose-v2
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER" || true
 
@@ -29,7 +29,13 @@ sudo corepack enable && sudo corepack prepare pnpm@10.8.1 --activate
 sudo npm i -g pm2 >/dev/null 2>&1 || true
 
 echo "==> 3/8 fetch code"
-if [ -d "$APP_DIR/.git" ]; then git -C "$APP_DIR" pull --ff-only; else git clone "$REPO_URL" "$APP_DIR"; fi
+if [ -f "$APP_DIR/package.json" ] && [ ! -d "$APP_DIR/.git" ]; then
+  echo "using pre-synced code at $APP_DIR"
+elif [ -d "$APP_DIR/.git" ]; then
+  git -C "$APP_DIR" pull --ff-only
+else
+  git clone "$REPO_URL" "$APP_DIR"
+fi
 cd "$APP_DIR"
 
 echo "==> 4/8 .env (edit secrets if first run)"
@@ -41,18 +47,19 @@ fi
 set -a; . ./.env; set +a
 
 echo "==> 5/8 postgres + redis (docker)"
-docker compose --env-file .env -f infra/docker-compose.yml up -d postgres redis
-until docker compose -f infra/docker-compose.yml exec -T postgres pg_isready -U "${POSTGRES_USER:-bhashai}" >/dev/null 2>&1; do sleep 2; done
+sudo docker compose --env-file .env -f infra/docker-compose.yml up -d postgres redis
+until sudo docker compose --env-file .env -f infra/docker-compose.yml exec -T postgres pg_isready -U "${POSTGRES_USER:-bhashai}" >/dev/null 2>&1; do sleep 2; done
 
 echo "==> 6/8 install + build (node) + parser venv (python)"
-pnpm install --frozen-lockfile
+pnpm install
 pnpm --filter @bhashai/db exec prisma generate
-pnpm turbo run build
+NODE_OPTIONS=--max-old-space-size=6144 pnpm turbo run build
 pnpm --filter @bhashai/db exec prisma migrate deploy
 python3 -m venv services/parser/.venv
 services/parser/.venv/bin/pip install -q -r services/parser/requirements.txt
-# Devanagari font for the shaped overlay (Linux Noto)
-export BHASHAI_FONT="${BHASHAI_FONT:-/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf}"
+# Devanagari font for the shaped overlay (find an installed Hindi-capable font)
+export BHASHAI_FONT="$(fc-list :lang=hi file 2>/dev/null | sort | head -1 | cut -d: -f1)"
+echo "Devanagari font: ${BHASHAI_FONT:-NONE FOUND}"
 
 echo "==> 7/8 start services (pm2 + parser)"
 pm2 delete bhashai-parser >/dev/null 2>&1 || true
