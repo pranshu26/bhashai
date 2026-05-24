@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, clearToken, getToken, LANGUAGES, type Job } from '@/lib/api';
 
-export function statusBadge(s: string) {
+function statusBadge(s: string) {
   if (s === 'COMPLETED') return <span className="badge ok">Completed</span>;
   if (s === 'PARTIALLY_COMPLETED') return <span className="badge warn">Partial</span>;
   if (s === 'FAILED') return <span className="badge err">Failed</span>;

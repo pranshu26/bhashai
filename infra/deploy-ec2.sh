@@ -53,7 +53,16 @@ until sudo docker compose --env-file .env -f infra/docker-compose.yml exec -T po
 echo "==> 6/8 install + build (node) + parser venv (python)"
 pnpm install
 pnpm --filter @bhashai/db exec prisma generate
-NODE_OPTIONS=--max-old-space-size=6144 pnpm turbo run build
+# Fresh build: drop dist/.next AND the tsc incremental cache (*.tsbuildinfo lives at the
+# package root, not in dist). If it survives, tsc sees "already built" and emits nothing —
+# leaving dependents unable to resolve @bhashai/shared.
+pnpm -r exec -- sh -c 'rm -rf dist .next ./*.tsbuildinfo' 2>/dev/null || true
+# Build one package at a time in explicit dependency order. pnpm -r / turbo don't reliably
+# order these (web declares no internal deps), and sequential keeps peak RAM low on 8GB.
+for pkg in shared db storage engines parsing api worker web; do
+  echo "--- build @bhashai/$pkg ---"
+  NODE_OPTIONS=--max-old-space-size=6144 pnpm --filter "@bhashai/$pkg" run build
+done
 pnpm --filter @bhashai/db exec prisma migrate deploy
 python3 -m venv services/parser/.venv
 services/parser/.venv/bin/pip install -q -r services/parser/requirements.txt
@@ -64,8 +73,9 @@ echo "Devanagari font: ${BHASHAI_FONT:-NONE FOUND}"
 echo "==> 7/8 start services (pm2 + parser)"
 pm2 delete bhashai-parser >/dev/null 2>&1 || true
 BHASHAI_FONT="$BHASHAI_FONT" ENABLE_OCR="${ENABLE_OCR:-local}" \
-  pm2 start "services/parser/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000" \
-  --name bhashai-parser --cwd "$APP_DIR/services/parser"
+  pm2 start "$APP_DIR/services/parser/.venv/bin/python" \
+  --name bhashai-parser --cwd "$APP_DIR/services/parser" --interpreter none \
+  -- -m uvicorn app:app --host 127.0.0.1 --port 8000
 pm2 delete bhashai-api bhashai-worker bhashai-web >/dev/null 2>&1 || true
 pm2 start "node apps/api/dist/main.js"   --name bhashai-api    --cwd "$APP_DIR"
 pm2 start "node apps/worker/dist/main.js" --name bhashai-worker --cwd "$APP_DIR"
