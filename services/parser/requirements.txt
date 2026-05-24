@@ -7,3 +7,4 @@ uvicorn[standard]>=0.32
 pillow>=11
 pydantic>=2.9
 pytesseract>=0.3.13     # OCR for image-baked text (ENABLE_OCR=local; needs system `tesseract`)
+# system libs required: tesseract (OCR), libraqm (Indic/Arabic text shaping for Pillow)

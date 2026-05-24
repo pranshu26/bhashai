@@ -3,11 +3,13 @@ vector artwork), re-insert the translation in place with overflow-proof auto-fit
 
 Importable by the FastAPI app and the CLI script. Translation is delegated to the IndicTrans2
 service over HTTP (/translate_batch)."""
+import io
 import json
 import os
 import urllib.request
 
 import fitz  # PyMuPDF
+from PIL import Image, ImageDraw, ImageFont  # HarfBuzz-shaped text rendering (raqm)
 
 # macOS system fonts cover all 12 target scripts for local dev. On Linux/EC2, set FONT_DIR to a
 # dir of Noto fonts (see deploy docs) or DEVANAGARI_FONT/<LANG>_FONT envs.
@@ -100,6 +102,75 @@ def place_text(page, rect, text, fs_start, fs_min, rgb, page_h):
         if page.insert_textbox(box, text, fontname="tgt", fontsize=fs2, color=rgb, align=0) >= 0:
             return fs2, True
     return fs_min, True
+
+
+def _pil_font(font_path, size_px):
+    try:
+        return ImageFont.truetype(font_path, size_px, layout_engine=ImageFont.Layout.RAQM)
+    except Exception:
+        return ImageFont.truetype(font_path, size_px)
+
+
+def _wrap_words(draw, words, font, max_w):
+    lines, cur = [], ""
+    for w in words:
+        trial = (cur + " " + w).strip()
+        if not cur or draw.textlength(trial, font=font) <= max_w:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def render_text_png(text, box_w_pt, box_h_pt, color_rgb, font_path, scale=3.0, max_fs_pt=None, min_fs_pt=5.0):
+    """Render HarfBuzz/raqm-shaped text to a transparent PNG. Returns (png_bytes, height_pt, fits).
+    PyMuPDF's text insertion does NOT shape Indic scripts (conjuncts/matras break); this does."""
+    color = tuple(int(max(0.0, min(1.0, c)) * 255) for c in color_rgb)
+    w_px = max(4, int(box_w_pt * scale))
+    probe = ImageDraw.Draw(Image.new("RGBA", (w_px, 8)))
+    words = text.split() or [text]
+    fs = max(min_fs_pt, max_fs_pt or box_h_pt)
+    best = None
+    while fs >= min_fs_pt:
+        font = _pil_font(font_path, max(6, int(fs * scale)))
+        lines = _wrap_words(probe, words, font, w_px)
+        asc, desc = font.getmetrics()
+        lh = (asc + desc) * 1.2
+        best = (font, lines, lh, lh * len(lines))
+        if lh * len(lines) <= box_h_pt * scale:
+            break
+        fs -= 0.5
+    font, lines, lh, total = best
+    h_px = max(int(lh), int(total) + 2)
+    img = Image.new("RGBA", (w_px, h_px), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    y = 0.0
+    for ln in lines:
+        d.text((0, y), ln, font=font, fill=color + (255,))
+        y += lh
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue(), h_px / scale, total <= box_h_pt * scale
+
+
+def place_text_img(page, rect, text, color_rgb, font_path, size_hint_pt, page_h):
+    """Draw correctly-shaped translated text as a transparent image overlay. Returns grew(bool)."""
+    text = text.strip()
+    if not text:
+        return False
+    box_w = rect.width + 2.0
+    png, h_pt, fits = render_text_png(
+        text, box_w, rect.height + 1.0, color_rgb, font_path, max_fs_pt=max(7.0, size_hint_pt)
+    )
+    y0 = rect.y0 - 1.0
+    bottom = min(page_h - 2.0, y0 + h_pt)
+    page.insert_image(
+        fitz.Rect(rect.x0 - 1.0, y0, rect.x0 - 1.0 + box_w, bottom), stream=png, keep_proportion=False
+    )
+    return not fits
 
 
 def analyze_pdf(in_path):
@@ -204,13 +275,12 @@ def ocr_translate_page(page, target, service_url, font_path, min_conf=55, post_e
         return stats
     if post_edit:
         translations = apply_postedit([t for _, t in todo], translations, target)
-    page.insert_font(fontname="tgt", fontfile=font_path)
     page_h = page.rect.height
     for (rect, _src), tr in zip(todo, translations):
         bg = _sample_bg(pix, rect, zoom)
         page.draw_rect(rect, color=bg, fill=bg)
         tcol = (0, 0, 0) if _luma(bg) > 0.55 else (1, 1, 1)
-        place_text(page, rect, tr, max(7.0, rect.height * 0.85), 5.0, tcol, page_h)
+        place_text_img(page, rect, tr, tcol, font_path, max(7.0, rect.height * 0.85), page_h)
         stats["ocrTranslated"] += 1
     return stats
 
@@ -271,10 +341,9 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
         page.apply_redactions(
             images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE
         )
-        page.insert_font(fontname="tgt", fontfile=font_path)
         page_h = page.rect.height
         for (rect, _t, size, rgb), translated in zip(blocks, translations):
-            _fs, grew = place_text(page, rect, translated, max(6.0, size), 4.0, rgb, page_h)
+            grew = place_text_img(page, rect, translated, rgb, font_path, max(7.0, size), page_h)
             if grew:
                 info["overflow"] += 1
                 report["overflowBlocks"] += 1
