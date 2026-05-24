@@ -130,7 +130,80 @@ def analyze_pdf(in_path):
     }
 
 
-def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_path=None):
+def _luma(rgb):
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+
+def _sample_bg(pix, rect, zoom):
+    """Sample a background colour just above a text rect (pixmap pixel space) to cover with."""
+    x = max(0, min(pix.width - 1, int((rect.x0 + rect.x1) / 2 * zoom)))
+    y = max(0, min(pix.height - 1, int(rect.y0 * zoom) - max(2, int(rect.height * zoom * 0.4))))
+    try:
+        p = pix.pixel(x, y)
+        return (p[0] / 255, p[1] / 255, p[2] / 255)
+    except Exception:
+        return (1, 1, 1)
+
+
+def ocr_translate_page(page, target, service_url, font_path, min_conf=55):
+    """OCR text baked into an image page; translate high-confidence lines and overlay them.
+    Low-confidence regions are left untouched and flagged (never silently wrong)."""
+    import io
+    import pytesseract
+    from PIL import Image
+
+    zoom = 200 / 72.0
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+    data = pytesseract.image_to_data(
+        Image.open(io.BytesIO(pix.tobytes("png"))), output_type=pytesseract.Output.DICT
+    )
+    lines: dict = {}
+    for i in range(len(data["text"])):
+        txt = data["text"][i].strip()
+        try:
+            conf = float(data["conf"][i])
+        except ValueError:
+            conf = -1.0
+        if not txt or conf < 0:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        e = lines.setdefault(key, {"w": [], "c": [], "x0": 1e9, "y0": 1e9, "x1": 0.0, "y1": 0.0})
+        e["w"].append(txt)
+        e["c"].append(conf)
+        x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+        e["x0"], e["y0"] = min(e["x0"], x), min(e["y0"], y)
+        e["x1"], e["y1"] = max(e["x1"], x + w), max(e["y1"], y + h)
+
+    stats = {"ocrLines": 0, "ocrTranslated": 0, "ocrLowConf": 0}
+    todo = []
+    for e in lines.values():
+        text = " ".join(e["w"]).strip()
+        if len(text) < 2 or not any(ch.isalpha() for ch in text):
+            continue
+        stats["ocrLines"] += 1
+        if sum(e["c"]) / len(e["c"]) < min_conf:
+            stats["ocrLowConf"] += 1
+            continue
+        todo.append((fitz.Rect(e["x0"] / zoom, e["y0"] / zoom, e["x1"] / zoom, e["y1"] / zoom), text))
+
+    if not todo:
+        return stats
+    try:
+        translations = translate_via_service([t for _, t in todo], target, service_url)
+    except Exception:
+        return stats
+    page.insert_font(fontname="tgt", fontfile=font_path)
+    page_h = page.rect.height
+    for (rect, _src), tr in zip(todo, translations):
+        bg = _sample_bg(pix, rect, zoom)
+        page.draw_rect(rect, color=bg, fill=bg)
+        tcol = (0, 0, 0) if _luma(bg) > 0.55 else (1, 1, 1)
+        place_text(page, rect, tr, max(7.0, rect.height * 0.85), 5.0, tcol, page_h)
+        stats["ocrTranslated"] += 1
+    return stats
+
+
+def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_path=None, ocr=False):
     """Translate a PDF in place (layout-preserved). Returns a report dict."""
     font_path = font_path or resolve_font(target)
     doc = fitz.open(in_path)
@@ -141,6 +214,9 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
         "blocksTranslated": 0,
         "overflowBlocks": 0,
         "imageTextPages": 0,
+        "ocrPages": 0,
+        "ocrLinesTranslated": 0,
+        "ocrLowConf": 0,
         "failedPages": 0,
         "pages": [],
     }
@@ -151,7 +227,15 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
         info = {"page": pi + 1, "blocks": len(blocks), "overflow": 0}
         if not blocks:
             report["imageTextPages"] += 1
-            info["note"] = "no text layer (image/graphic page) — artwork kept, flagged"
+            if ocr:
+                st = ocr_translate_page(page, target, service_url, font_path)
+                info["ocr"] = st
+                report["ocrLinesTranslated"] += st["ocrTranslated"]
+                report["ocrLowConf"] += st["ocrLowConf"]
+                if st["ocrTranslated"] > 0:
+                    report["ocrPages"] += 1
+            else:
+                info["note"] = "no text layer (image/graphic page) — artwork kept, flagged"
             report["pages"].append(info)
             continue
 

@@ -6,4 +6,4 @@ fastapi>=0.115
 uvicorn[standard]>=0.32
 pillow>=11
 pydantic>=2.9
-# OCR (enabled via ENABLE_OCR): pytesseract / amazon-textract added in Phase 2
+pytesseract>=0.3.13     # OCR for image-baked text (ENABLE_OCR=local; needs system `tesseract`)

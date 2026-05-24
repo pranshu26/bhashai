@@ -29,6 +29,10 @@ class TranslatePdfReq(BaseModel):
     out_path: str
     target: str
     pages: str = ""
+    ocr: bool | None = None  # None => use ENABLE_OCR env default
+
+
+ENABLE_OCR = os.environ.get("ENABLE_OCR", "false").lower() in ("local", "tesseract", "true", "textract")
 
 
 @app.get("/health")
@@ -51,7 +55,8 @@ def translate_pdf(req: TranslatePdfReq) -> dict:
     if not os.path.exists(req.in_path):
         raise HTTPException(404, f"not found: {req.in_path}")
     os.makedirs(os.path.dirname(req.out_path) or ".", exist_ok=True)
+    ocr = ENABLE_OCR if req.ocr is None else req.ocr
     try:
-        return overlay.translate_pdf(req.in_path, req.out_path, req.target, INDICTRANS_URL, req.pages)
+        return overlay.translate_pdf(req.in_path, req.out_path, req.target, INDICTRANS_URL, req.pages, ocr=ocr)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, str(e))
