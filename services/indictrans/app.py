@@ -64,8 +64,8 @@ class _Engine:
         with torch.no_grad():
             generated = self.model.generate(
                 **inputs,
-                use_cache=True,
-                min_length=0,
+                use_cache=False,  # IndicTrans2 remote code uses legacy tuple cache; incompatible
+                min_length=0,     # with transformers >=4.44 Cache. Disabling avoids the mismatch.
                 max_length=MAX_LEN,
                 num_beams=5,
                 num_return_sequences=1,
