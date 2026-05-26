@@ -69,3 +69,24 @@ def translate_pdf(req: TranslatePdfReq) -> dict:
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, str(e))
+
+
+class TranslateDocxReq(BaseModel):
+    in_path: str
+    out_path: str
+    target: str
+    engine: str | None = None  # None => TRANSLATE_ENGINE env
+
+
+@app.post("/translate-docx")
+def translate_docx(req: TranslateDocxReq) -> dict:
+    if not os.path.exists(req.in_path):
+        raise HTTPException(404, f"not found: {req.in_path}")
+    os.makedirs(os.path.dirname(req.out_path) or ".", exist_ok=True)
+    engine = TRANSLATE_ENGINE if req.engine is None else req.engine
+    try:
+        return overlay.translate_docx(
+            req.in_path, req.out_path, req.target, engine=engine, progress_path=req.out_path + ".progress",
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, str(e))

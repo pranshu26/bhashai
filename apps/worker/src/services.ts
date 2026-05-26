@@ -67,3 +67,11 @@ export const parserAnalyze = (inPath: string) =>
 
 export const parserTranslatePdf = (inPath: string, outPath: string, target: string, pages = '') =>
   postJson('/translate-pdf', { in_path: inPath, out_path: outPath, target, pages }) as Promise<PdfReport>;
+
+export interface DocxReport {
+  blocksTranslated: number;
+  failedBlocks: number;
+  failedPages: number;
+}
+export const parserTranslateDocx = (inPath: string, outPath: string, target: string) =>
+  postJson('/translate-docx', { in_path: inPath, out_path: outPath, target }) as Promise<DocxReport>;

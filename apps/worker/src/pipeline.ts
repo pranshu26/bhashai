@@ -10,6 +10,7 @@ import {
   localPath,
   parserAnalyze,
   parserTranslatePdf,
+  parserTranslateDocx,
 } from './services';
 
 type JobRow = NonNullable<Awaited<ReturnType<typeof prisma.translationJob.findUnique>>>;
@@ -33,6 +34,8 @@ export async function processJob(jobId: string): Promise<void> {
 
     if (docType.startsWith('PDF')) {
       await processPdf(job);
+    } else if (docType === 'DOCX') {
+      await processDocx(job);
     } else {
       await processText(job, docType);
     }
@@ -102,6 +105,55 @@ async function processPdf(job: JobRow): Promise<void> {
     'EXPORT',
     partial ? 'job.partially_completed' : 'job.completed',
     `blocks=${report.blocksTranslated} overflow=${report.overflowBlocks} imageTextPages=${report.imageTextPages} failedPages=${report.failedPages} failedBlocks=${report.failedBlocks}`,
+  );
+}
+
+async function processDocx(job: JobRow): Promise<void> {
+  const inPath = localPath('raw', job.originalFileUrl!);
+  await setJob(job.id, { status: 'TRANSLATING', currentStage: 'TRANSLATE', progressPercentage: 10 });
+  await event(job.id, 'TRANSLATE', 'chunk.translate.started', 'docx (structure-preserved)');
+
+  const exportKey = StorageKeys.exportFile(job.id, job.outputMode, 'docx');
+  const outPath = localPath('processed', exportKey);
+  const report = await parserTranslateDocx(inPath, outPath, job.targetLanguage);
+
+  if (storage.kind === 's3') {
+    await storage.processed.put(
+      exportKey,
+      readFileSync(outPath),
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    );
+  }
+  await prisma.exportedFile.create({
+    data: {
+      jobId: job.id,
+      outputMode: job.outputMode,
+      format: 'docx',
+      fileUrl: exportKey,
+      sizeBytes: statSync(outPath).size,
+      isPartial: report.failedBlocks > 0,
+    },
+  });
+
+  const partial = report.failedBlocks > 0;
+  await setJob(job.id, {
+    status: partial ? 'PARTIALLY_COMPLETED' : 'COMPLETED',
+    currentStage: 'DONE',
+    progressPercentage: 100,
+    translatedFileUrl: exportKey,
+    totalChunks: report.blocksTranslated,
+    completedChunks: report.blocksTranslated - report.failedBlocks,
+    failedChunks: report.failedBlocks,
+    errorMessage: partial
+      ? `${report.failedBlocks} paragraph(s) kept the original English — usually a transient rate limit. Re-running often clears it.`
+      : null,
+    completedAt: new Date(),
+  });
+  await event(
+    job.id,
+    'EXPORT',
+    partial ? 'job.partially_completed' : 'job.completed',
+    `format=docx blocks=${report.blocksTranslated} failed=${report.failedBlocks}`,
   );
 }
 

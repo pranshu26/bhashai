@@ -50,7 +50,9 @@ export default function JobPage() {
     setDownloading(true);
     try {
       const base = (meta?.originalFileName || 'document').replace(/\.[^.]+$/, '');
-      await downloadJob(id, `${base}-${meta?.targetLanguage || 'translated'}.pdf`);
+      const srcExt = meta?.originalFileName?.split('.').pop()?.toLowerCase();
+      const outExt = srcExt === 'docx' ? 'docx' : srcExt === 'txt' ? 'txt' : 'pdf';
+      await downloadJob(id, `${base}-${meta?.targetLanguage || 'translated'}.${outExt}`);
     } catch (e: any) {
       setErr(e.message);
     } finally {

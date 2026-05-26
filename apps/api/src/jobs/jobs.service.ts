@@ -147,7 +147,8 @@ export class JobsService {
       throw new BadRequestException('job not finished');
     if (!job.translatedFileUrl) throw new NotFoundException('no output yet');
     const store = this.storage.storage.processed;
-    const filename = `${(job.originalFileName ?? 'document').replace(/\.[^.]+$/, '')}-${job.targetLanguage}.pdf`;
+    const ext = job.translatedFileUrl.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() ?? 'pdf';
+    const filename = `${(job.originalFileName ?? 'document').replace(/\.[^.]+$/, '')}-${job.targetLanguage}.${ext}`;
     if (store.supportsPresign) {
       const { url } = await store.presignGet(job.translatedFileUrl);
       return { kind: 'url' as const, url };

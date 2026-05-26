@@ -578,3 +578,69 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
         except OSError:
             pass
     return report
+
+
+def translate_docx(in_path, out_path, target, engine="sarvam", progress_path=None):
+    """Translate a .docx in place, preserving structure. Works paragraph-level (join the runs, get
+    one translation, write it into the first run and clear the rest) so styles/lists/headings/tables
+    survive. Covers body, tables, and headers/footers. Returns a report dict."""
+    from docx import Document
+
+    doc = Document(in_path)
+    paras = list(doc.paragraphs)
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                paras.extend(cell.paragraphs)
+    for section in doc.sections:
+        for hf in (section.header, section.footer):
+            paras.extend(hf.paragraphs)
+
+    idx, texts = [], []
+    for i, p in enumerate(paras):
+        if p.text and p.text.strip():
+            idx.append(i)
+            texts.append(p.text)
+
+    report = {"blocksTranslated": len(texts), "failedBlocks": 0, "failedPages": 0, "failedPageNumbers": []}
+    if not texts:
+        doc.save(out_path)
+        return report
+
+    def _wp(done, total):
+        if not progress_path:
+            return
+        try:
+            with open(progress_path, "w") as f:
+                json.dump({"done": int(done), "total": int(total), "phase": "translate"}, f)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _wp(0, len(texts))
+    if engine == "sarvam":
+        tr, failed, _err = _sarvam_translate(texts, target, on_progress=_wp)
+    elif engine == "llm":
+        import llm_postedit
+
+        tr, failed, _err = llm_postedit.translate_batch(texts, target)
+    else:
+        tr, failed, _err = _batch_translate(texts, target, os.environ.get("INDICTRANS_SERVICE_URL", ""))
+
+    for k, i in enumerate(idx):
+        p = paras[i]
+        if p.runs:
+            p.runs[0].text = tr[k]
+            for r in p.runs[1:]:
+                r.text = ""
+        else:
+            p.text = tr[k]
+
+    report["failedBlocks"] = len(failed)
+    report["failedPages"] = len(failed)
+    if progress_path:
+        try:
+            os.remove(progress_path)
+        except OSError:
+            pass
+    doc.save(out_path)
+    return report
