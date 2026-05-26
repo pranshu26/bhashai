@@ -167,41 +167,68 @@ def post_edit_batch(pairs, target_code, batch_size=12, max_workers=None):
     return out
 
 
-def translate_batch(texts, target_code, batch_size=8, max_workers=None):
+def translate_batch(texts, target_code, batch_size=6, max_workers=None):
     """Translate English `texts` -> target language directly via the chat LLM. Returns
-    (translations, failed_index_set, last_err) — same shape as overlay._batch_translate."""
+    (translations, failed_index_set, last_err). On a batch count-mismatch it retries each item
+    individually so paragraphs never silently fall back to English."""
     kind, key, model, base_url = _provider_cfg()
     if kind is None or not texts:
         return list(texts), (set(range(len(texts))) if texts else set()), None
     if max_workers is None:
         max_workers = int(os.environ.get("POST_EDIT_CONCURRENCY", "6"))
     lang = _LANG_NAMES.get(target_code, target_code)
+    glossary = os.environ.get("TRANSLATION_GLOSSARY", "")
+    if not glossary and target_code == "hi":
+        glossary = "AI=एआई; prompt=प्रॉम्प्ट; internet=इंटरनेट; website=वेबसाइट; search engine=सर्च इंजन; email=ईमेल; password=पासवर्ड; online=ऑनलाइन; computer=कंप्यूटर"
+    gloss = f"\n- Prefer these {lang} renderings for key terms: {glossary}" if glossary else ""
     system = (
-        f"You are an expert English->{lang} translator for official and educational documents. "
-        f"Translate each English line into fluent, natural, accurate {lang}, preserving the exact "
-        f"meaning, numbers, names, dates, citations, and any English terms/acronyms that are "
-        f"conventionally kept. Do not add, drop, or explain anything. Return ONLY a JSON array of "
-        f"strings — the {lang} translations, in the same order and same count. No prose, no markdown."
+        f"You are an expert English->{lang} translator for school/teacher educational materials. "
+        f"Translate each line into fluent, natural {lang} a teacher can use directly.\n"
+        f"- Translate EVERYTHING; leave NO English except URLs, email addresses, proper nouns, and "
+        f"fill-in-the-blank markers (runs of underscores).\n"
+        f"- Keep terminology, acronyms, and proper nouns CONSISTENT throughout (one rendering each).\n"
+        f"- Preserve the exact meaning, examples, comparisons, numbers, dates, URLs and symbols.{gloss}\n"
+        f"Return ONLY a JSON array of strings — the {lang} translations, same order and same count. "
+        f"No prose, no markdown."
     )
+    batch_size = int(os.environ.get("TRANSLATE_BATCH", batch_size))
     chunks = [(i, texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)]
     last_err = {"v": None}
 
-    def _do(item):
-        start, chunk = item
+    def _try_chunk(chunk):
+        """Returns a list of len(chunk) translations, or None on error/count-mismatch."""
         items = [{"n": j + 1, "text": t} for j, t in enumerate(chunk)]
         user = (
-            f"Translate these {len(chunk)} lines to {lang}. Return a JSON array of exactly "
-            f"{len(chunk)} strings.\n" + json.dumps(items, ensure_ascii=False)
+            f"Translate these {len(chunk)} lines to {lang}. Return a JSON array of EXACTLY "
+            f"{len(chunk)} strings — one per input item, same order. Do NOT merge, split, add or "
+            f"omit items.\n" + json.dumps(items, ensure_ascii=False)
         )
         try:
-            raw = _call_llm(system, user, kind, key, model, base_url, max_tokens=4096).strip()
+            raw = _call_llm(system, user, kind, key, model, base_url, max_tokens=8000).strip()
             s, e = raw.find("["), raw.rfind("]")
             arr = json.loads(raw[s : e + 1]) if s >= 0 and e > s else None
             if isinstance(arr, list) and len(arr) == len(chunk):
-                return (start, [str(x) for x in arr], True)
+                return [str(x) for x in arr]
         except Exception as ex:  # noqa: BLE001
             last_err["v"] = str(ex)
-        return (start, list(chunk), False)
+        return None
+
+    def _do(item):
+        start, chunk = item
+        got = _try_chunk(chunk)
+        if got is not None:
+            return (start, got, [True] * len(chunk))
+        if len(chunk) == 1:
+            return (start, [chunk[0]], [False])  # single item failed -> keep source
+        # batch count-mismatch/error -> translate each item ALONE (guarantees completeness)
+        vals, oks = [], []
+        for c in chunk:
+            one = _try_chunk([c])
+            if one is not None:
+                vals.append(one[0]); oks.append(True)
+            else:
+                vals.append(c); oks.append(False)
+        return (start, vals, oks)
 
     if len(chunks) <= 1:
         results = [_do(chunks[0])] if chunks else []
@@ -212,9 +239,9 @@ def translate_batch(texts, target_code, batch_size=8, max_workers=None):
 
     out = list(texts)
     failed: set = set()
-    for start, vals, ok in results:
-        for k, v in enumerate(vals):
+    for start, vals, oks in results:
+        for k, (v, ok) in enumerate(zip(vals, oks)):
             out[start + k] = v
-        if not ok:
-            failed.update(range(start, start + len(vals)))
+            if not ok:
+                failed.add(start + k)
     return out, failed, last_err["v"]
