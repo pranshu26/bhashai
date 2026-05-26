@@ -42,7 +42,7 @@ echo "==> 4/8 .env (edit secrets if first run)"
 if [ ! -f .env ]; then
   cp .env.example .env
   echo "!!! Created .env from template — set JWT_SECRET, ANTHROPIC_API_KEY, INDICTRANS_SERVICE_URL,"
-  echo "    POSTGRES_PORT, REDIS_PORT, WEB_PUBLIC_API_URL=http://<EC2-IP>/api, then re-run."
+  echo "    POSTGRES_PORT, REDIS_PORT, NEXT_PUBLIC_API_URL=http://<EC2-IP>/api, then re-run."
 fi
 set -a; . ./.env; set +a
 
