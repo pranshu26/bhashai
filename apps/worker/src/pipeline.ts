@@ -82,18 +82,26 @@ async function processPdf(job: JobRow): Promise<void> {
   });
 
   const partial = report.failedPages > 0;
+  const pagesList = report.failedPageNumbers?.length ? ` (pages ${report.failedPageNumbers.join(', ')})` : '';
+  const failNote = partial
+    ? `${report.failedBlocks} text block(s) across ${report.failedPages} page(s) kept the original English${pagesList} — usually a transient rate limit. Re-running the translation often clears it.`
+    : null;
   await setJob(job.id, {
     status: partial ? 'PARTIALLY_COMPLETED' : 'COMPLETED',
     currentStage: 'DONE',
     progressPercentage: 100,
     translatedFileUrl: exportKey,
+    totalChunks: report.blocksTranslated,
+    completedChunks: report.blocksTranslated - report.failedBlocks,
+    failedChunks: report.failedBlocks,
+    errorMessage: failNote,
     completedAt: new Date(),
   });
   await event(
     job.id,
     'EXPORT',
     partial ? 'job.partially_completed' : 'job.completed',
-    `blocks=${report.blocksTranslated} overflow=${report.overflowBlocks} imageTextPages=${report.imageTextPages} failedPages=${report.failedPages}`,
+    `blocks=${report.blocksTranslated} overflow=${report.overflowBlocks} imageTextPages=${report.imageTextPages} failedPages=${report.failedPages} failedBlocks=${report.failedBlocks}`,
   );
 }
 

@@ -82,15 +82,36 @@ export class JobsService {
     return { id: job.id, status: 'EXTRACTING' };
   }
 
+  private static readonly RUNNING = [
+    'EXTRACTING', 'ANALYZING', 'CHUNKING', 'TRANSLATING', 'POST_EDITING', 'QA', 'RECONSTRUCTING', 'EXPORTING',
+  ];
+
   async progress(userId: string, id: string) {
     const job = await this.owned(userId, id);
+    let { progressPercentage, completedChunks, totalChunks } = job;
+    // While a PDF job runs, the parser writes a live progress file next to the export; read it so
+    // the bar climbs in real time. Best-effort — any miss falls back to the DB values (no regression).
+    if (JobsService.RUNNING.includes(job.status)) {
+      try {
+        const key = StorageKeys.exportFile(job.id, job.outputMode, 'pdf') + '.progress';
+        const raw = await this.storage.storage.processed.get(key);
+        const p = JSON.parse(raw.toString());
+        if (p && p.total > 0) {
+          completedChunks = p.done;
+          totalChunks = p.total;
+          progressPercentage = Math.min(94, 10 + Math.round((84 * p.done) / p.total));
+        }
+      } catch {
+        /* no progress file (not started / finished) — use DB values */
+      }
+    }
     return {
       id: job.id,
       status: job.status,
       currentStage: job.currentStage,
-      progressPercentage: job.progressPercentage,
-      totalChunks: job.totalChunks,
-      completedChunks: job.completedChunks,
+      progressPercentage,
+      totalChunks,
+      completedChunks,
       failedChunks: job.failedChunks,
       errorMessage: job.errorMessage,
       hasOutput: !!job.translatedFileUrl,

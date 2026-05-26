@@ -58,6 +58,8 @@ export interface PdfReport {
   overflowBlocks: number;
   imageTextPages: number;
   failedPages: number;
+  failedBlocks: number;
+  failedPageNumbers: number[];
 }
 
 export const parserAnalyze = (inPath: string) =>

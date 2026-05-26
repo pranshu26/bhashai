@@ -65,7 +65,7 @@ def translate_pdf(req: TranslatePdfReq) -> dict:
     try:
         return overlay.translate_pdf(
             req.in_path, req.out_path, req.target, INDICTRANS_URL, req.pages,
-            ocr=ocr, post_edit=post_edit, engine=engine,
+            ocr=ocr, post_edit=post_edit, engine=engine, progress_path=req.out_path + ".progress",
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, str(e))

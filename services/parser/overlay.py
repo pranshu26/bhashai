@@ -339,7 +339,7 @@ def _split_for_limit(text, limit=900):
     return out
 
 
-def _sarvam_translate(texts, target, src="en", workers=8):
+def _sarvam_translate(texts, target, src="en", workers=8, on_progress=None):
     """Translate blocks via Sarvam's dedicated Translation API (no reasoning -> fast, concurrent).
 
     To stay frugal on request quota, many short blocks are packed into ONE request (newline-joined,
@@ -364,7 +364,8 @@ def _sarvam_translate(texts, target, src="en", workers=8):
             "input": text, "source_language_code": src_code,
             "target_language_code": tgt, "model": model,
         }).encode()
-        for attempt in range(5):
+        attempts = 7
+        for attempt in range(attempts):
             req = urllib.request.Request(
                 "https://api.sarvam.ai/translate", data=body,
                 headers={"api-subscription-key": key, "content-type": "application/json"},
@@ -373,13 +374,13 @@ def _sarvam_translate(texts, target, src="en", workers=8):
                 return json.loads(urllib.request.urlopen(req, timeout=90).read())["translated_text"]
             except urllib.error.HTTPError as ex:
                 last_err["v"] = f"HTTP {ex.code}"
-                if ex.code in (429, 500, 502, 503, 504) and attempt < 4:
-                    time.sleep(min(10.0, 1.5 * (2 ** attempt)) + random.random())
+                if ex.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                    time.sleep(min(20.0, 1.5 * (2 ** attempt)) + random.random())  # patient on rate limits
                     continue
                 raise
             except Exception as ex:  # noqa: BLE001 -- transient network: back off and retry
                 last_err["v"] = str(ex)
-                if attempt < 4:
+                if attempt < attempts - 1:
                     time.sleep(1.0 + random.random())
                     continue
                 raise
@@ -433,6 +434,12 @@ def _sarvam_translate(texts, target, src="en", workers=8):
                 res.append((idx, texts[idx], False))
         return res
 
+    done, total = 0, len(texts)
+    if on_progress:
+        try:
+            on_progress(0, total)
+        except Exception:  # noqa: BLE001
+            pass
     if batches:
         with ThreadPoolExecutor(max_workers=max(1, min(workers, len(batches)))) as ex:
             for res in ex.map(_do_batch, batches):
@@ -440,10 +447,16 @@ def _sarvam_translate(texts, target, src="en", workers=8):
                     out[idx] = val
                     if not ok:
                         failed.add(idx)
+                done += len(res)
+                if on_progress:
+                    try:
+                        on_progress(done, total)
+                    except Exception:  # noqa: BLE001
+                        pass
     return out, failed, last_err["v"]
 
 
-def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_path=None, ocr=False, post_edit=False, engine="sarvam"):
+def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_path=None, ocr=False, post_edit=False, engine="sarvam", progress_path=None):
     """Translate a PDF in place (layout-preserved). Returns a report dict.
 
     Two phases for speed: (1) extract ALL text blocks and translate them with concurrent batched
@@ -473,6 +486,8 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
         "ocrLinesTranslated": 0,
         "ocrLowConf": 0,
         "failedPages": 0,
+        "failedBlocks": 0,
+        "failedPageNumbers": [],
         "pages": [],
     }
 
@@ -484,8 +499,19 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
             flat_src.append(t)
             flat_idx.append((pi, bi))
 
+    def _write_progress(done, total):
+        # Live progress so the API can show a real climbing bar during the long translate pass.
+        if not progress_path:
+            return
+        try:
+            with open(progress_path, "w") as pf:
+                json.dump({"done": int(done), "total": int(total), "phase": "translate"}, pf)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _write_progress(0, len(flat_src))
     if engine == "sarvam":
-        flat_tr, failed_flat, translate_err = _sarvam_translate(flat_src, target)
+        flat_tr, failed_flat, translate_err = _sarvam_translate(flat_src, target, on_progress=_write_progress)
     elif engine == "llm":
         import llm_postedit
 
@@ -525,6 +551,7 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
         if page_failed[pi]:
             info["translateError"] = (translate_err or "translate failed")[:200]
             report["failedPages"] += 1
+            report["failedPageNumbers"].append(pi + 1)
 
         for rect, _t, _s, _c in blocks:
             page.add_redact_annot(rect)
@@ -544,4 +571,10 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
     for pi in pages:
         out.insert_pdf(doc, from_page=pi, to_page=pi)
     out.save(out_path, garbage=4, deflate=True)
+    report["failedBlocks"] = len(failed_flat)
+    if progress_path:
+        try:
+            os.remove(progress_path)  # done -> API falls back to the final DB status
+        except OSError:
+            pass
     return report
