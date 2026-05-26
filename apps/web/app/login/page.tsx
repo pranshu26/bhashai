@@ -32,7 +32,7 @@ export default function LoginPage() {
       <div className="brand"><span className="dot" /> BhashAI</div>
       <p className="muted" style={{ marginTop: 6 }}>English → Indian-language document translation</p>
       <div className="center">
-        <form className="card" style={{ width: 380 }} onSubmit={submit}>
+        <form className="card" style={{ width: 'min(420px, 100%)' }} onSubmit={submit}>
           <div className="tabs">
             <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>Log in</button>
             <button type="button" className={mode === 'signup' ? 'active' : ''} onClick={() => setMode('signup')}>Sign up</button>
