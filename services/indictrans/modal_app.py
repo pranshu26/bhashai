@@ -22,8 +22,8 @@ image = (
 app = modal.App("bhashai-indictrans")
 
 MODEL = "ai4bharat/indictrans2-en-indic-1B"
-NUM_BEAMS = 5
-BATCH = 32
+NUM_BEAMS = 1          # greedy: ~5x faster than beam=5; Sarvam-M post-edit repairs draft fluency
+BATCH = 64             # bigger batches keep the faster GPU saturated
 MAX_LEN = 256
 MAX_UNIT = 280
 FLORES = {
@@ -34,7 +34,7 @@ FLORES = {
 
 
 @app.cls(
-    gpu="T4",
+    gpu="L40S",  # ~4-6x faster than T4 for this 1B model; still scale-to-zero, billed per-second
     image=image,
     secrets=[modal.Secret.from_name("huggingface")],  # injects HF_TOKEN
     scaledown_window=300,  # stay warm 5 min after last request, then scale to zero

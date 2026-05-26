@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { createStorage } from '@bhashai/storage';
 import { buildEngines } from '@bhashai/engines';
 import { prisma } from '@bhashai/db';
+import { request, Agent } from 'undici';
 import { env } from './env';
 
 export { prisma };
@@ -27,14 +28,22 @@ export const { router, llm } = buildEngines(env);
 export const localPath = (store: 'raw' | 'processed', key: string) =>
   join(env.LOCAL_STORAGE_DIR, store, key);
 
+// The PDF path makes ONE long synchronous call to the parser (/translate-pdf) that can run for
+// minutes on large docs. Use undici directly with header/body timeouts DISABLED so the global
+// fetch's default 300s headersTimeout can never abort a long translation mid-flight again.
+const parserAgent = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
+
 async function postJson(path: string, body: unknown): Promise<unknown> {
-  const res = await fetch(env.PARSER_SERVICE_URL.replace(/\/$/, '') + path, {
+  const res = await request(env.PARSER_SERVICE_URL.replace(/\/$/, '') + path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    dispatcher: parserAgent,
   });
-  if (!res.ok) throw new Error(`parser-service ${path} ${res.status}: ${await res.text()}`);
-  return res.json();
+  if (res.statusCode < 200 || res.statusCode >= 300) {
+    throw new Error(`parser-service ${path} ${res.statusCode}: ${await res.body.text()}`);
+  }
+  return res.body.json();
 }
 
 export interface PdfAnalysis {

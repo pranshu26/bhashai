@@ -32,9 +32,11 @@ class TranslatePdfReq(BaseModel):
     pages: str = ""
     ocr: bool | None = None  # None => use ENABLE_OCR env default
     post_edit: bool | None = None  # None => on when an LLM key is configured
+    engine: str | None = None  # None => TRANSLATE_ENGINE env (llm | indictrans)
 
 
 ENABLE_OCR = os.environ.get("ENABLE_OCR", "false").lower() in ("local", "tesseract", "true", "textract")
+TRANSLATE_ENGINE = os.environ.get("TRANSLATE_ENGINE", "llm")  # llm = hosted Sarvam (no GPU); indictrans = Modal NMT
 
 
 @app.get("/health")
@@ -59,9 +61,11 @@ def translate_pdf(req: TranslatePdfReq) -> dict:
     os.makedirs(os.path.dirname(req.out_path) or ".", exist_ok=True)
     ocr = ENABLE_OCR if req.ocr is None else req.ocr
     post_edit = llm_postedit.is_enabled() if req.post_edit is None else req.post_edit
+    engine = TRANSLATE_ENGINE if req.engine is None else req.engine
     try:
         return overlay.translate_pdf(
-            req.in_path, req.out_path, req.target, INDICTRANS_URL, req.pages, ocr=ocr, post_edit=post_edit
+            req.in_path, req.out_path, req.target, INDICTRANS_URL, req.pages,
+            ocr=ocr, post_edit=post_edit, engine=engine,
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, str(e))

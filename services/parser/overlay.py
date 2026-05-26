@@ -6,6 +6,10 @@ service over HTTP (/translate_batch)."""
 import io
 import json
 import os
+import random
+import re
+import time
+import urllib.error
 import urllib.request
 
 import fitz  # PyMuPDF
@@ -285,9 +289,178 @@ def ocr_translate_page(page, target, service_url, font_path, min_conf=55, post_e
     return stats
 
 
-def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_path=None, ocr=False, post_edit=False):
-    """Translate a PDF in place (layout-preserved). Returns a report dict."""
+def _batch_translate(texts, target, service_url, chunk=64):
+    """Translate every source string in sequential batches. Batching (vs one-call-per-page) keeps
+    the GPU continuously fed; chunk is kept modest so each request finishes well under the Modal
+    function timeout (a 250-block chunk overran 600s and failed). Modal batches internally too.
+    Returns (translations, failed_index_set, last_err); always full-length (falls back to source)."""
+    out, failed, last_err = [], set(), None
+    for i in range(0, len(texts), chunk):
+        part = texts[i : i + chunk]
+        got = None
+        for _ in range(2):
+            try:
+                got = translate_via_service(part, target, service_url)
+                break
+            except Exception as ex:  # noqa: BLE001
+                last_err = str(ex)
+        if got is None or len(got) != len(part):
+            out.extend(part)  # fall back this chunk to source (never drop content)
+            failed.update(range(i, i + len(part)))
+        else:
+            out.extend(got)
+    return out, failed, last_err
+
+
+_SARVAM_LANG = {
+    "hi": "hi-IN", "bn": "bn-IN", "ta": "ta-IN", "te": "te-IN", "kn": "kn-IN", "ml": "ml-IN",
+    "mr": "mr-IN", "gu": "gu-IN", "pa": "pa-IN", "or": "od-IN", "as": "as-IN", "ur": "ur-IN", "en": "en-IN",
+}
+_SENT_SPLIT = re.compile(r"[^.?!।]*[.?!।]+|\S[^.?!।]*$")
+
+
+def _split_for_limit(text, limit=900):
+    """Split into <=limit-char pieces on sentence boundaries (Sarvam Translate caps input length)."""
+    if len(text) <= limit:
+        return [text]
+    parts = [p.strip() for p in _SENT_SPLIT.findall(text) if p.strip()] or [text]
+    out, cur = [], ""
+    for p in parts:
+        if len(p) > limit:
+            if cur:
+                out.append(cur); cur = ""
+            out.extend(p[k:k + limit] for k in range(0, len(p), limit))
+        elif cur and len(cur) + len(p) + 1 > limit:
+            out.append(cur); cur = p
+        else:
+            cur = f"{cur} {p}".strip() if cur else p
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _sarvam_translate(texts, target, src="en", workers=8):
+    """Translate blocks via Sarvam's dedicated Translation API (no reasoning -> fast, concurrent).
+
+    To stay frugal on request quota, many short blocks are packed into ONE request (newline-joined,
+    under a char/line budget) and the response is split back by line. If a batch's line count doesn't
+    match (alignment drift) it falls back to per-block; a block over the input cap is sentence-split
+    and rejoined. Retries with backoff on 429/5xx. Returns (translations, failed_set, err) — mirrors
+    _batch_translate so the PDF pipeline can swap engines transparently."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    key = os.environ.get("SARVAM_API_KEY") or os.environ.get("LLM_API_KEY", "")
+    model = os.environ.get("SARVAM_TRANSLATE_MODEL", "mayura:v1")
+    tgt = _SARVAM_LANG.get(target, f"{target}-IN")
+    src_code = _SARVAM_LANG.get(src, "en-IN")
+    workers = int(os.environ.get("SARVAM_CONCURRENCY", workers))
+    max_chars = int(os.environ.get("SARVAM_BATCH_CHARS", "700"))   # per-request input budget
+    max_lines = int(os.environ.get("SARVAM_BATCH_LINES", "15"))    # blocks per batched request
+    last_err = {"v": None}
+
+    def _api(text):
+        """One translate request with retry/backoff. Raises on persistent failure."""
+        body = json.dumps({
+            "input": text, "source_language_code": src_code,
+            "target_language_code": tgt, "model": model,
+        }).encode()
+        for attempt in range(5):
+            req = urllib.request.Request(
+                "https://api.sarvam.ai/translate", data=body,
+                headers={"api-subscription-key": key, "content-type": "application/json"},
+            )
+            try:
+                return json.loads(urllib.request.urlopen(req, timeout=90).read())["translated_text"]
+            except urllib.error.HTTPError as ex:
+                last_err["v"] = f"HTTP {ex.code}"
+                if ex.code in (429, 500, 502, 503, 504) and attempt < 4:
+                    time.sleep(min(10.0, 1.5 * (2 ** attempt)) + random.random())
+                    continue
+                raise
+            except Exception as ex:  # noqa: BLE001 -- transient network: back off and retry
+                last_err["v"] = str(ex)
+                if attempt < 4:
+                    time.sleep(1.0 + random.random())
+                    continue
+                raise
+        raise RuntimeError("unreachable")
+
+    # ---- group block indices into newline-joined batches under char/line budgets ----
+    out = list(texts)
+    failed: set = set()
+    batches: list = []          # each batch: list[(idx, stripped_text)]
+    cur: list = []
+    cur_chars = 0
+    for i, t in enumerate(texts):
+        s = (t or "").strip()
+        if not s:
+            continue  # keep original (blank) at this index
+        if len(s) > max_chars:
+            batches.append([(i, s)])  # long block: its own batch (sentence-split inside _do_batch)
+            continue
+        if cur and (cur_chars + len(s) + 1 > max_chars or len(cur) >= max_lines):
+            batches.append(cur)
+            cur, cur_chars = [], 0
+        cur.append((i, s))
+        cur_chars += len(s) + 1
+    if cur:
+        batches.append(cur)
+
+    def _do_batch(batch):
+        # single oversized block -> sentence-split, translate pieces, rejoin
+        if len(batch) == 1 and len(batch[0][1]) > max_chars:
+            idx, s = batch[0]
+            try:
+                return [(idx, " ".join(_api(p) for p in _split_for_limit(s, max_chars)), True)]
+            except Exception:  # noqa: BLE001
+                return [(idx, texts[idx], False)]
+        # batch as ONE numbered request ("1) .. 2) .."); the model preserves the markers (plain
+        # newlines/pipes get reflowed away), so we split the response back on them.
+        if len(batch) > 1:
+            try:
+                numbered = " ".join(f"{k + 1}) {s}" for k, (_, s) in enumerate(batch))
+                parts = [p.strip() for p in re.split(r"\s*\d+\)\s*", _api(numbered)) if p.strip()]
+                if len(parts) == len(batch):
+                    return [(batch[k][0], parts[k], True) for k in range(len(batch))]
+            except Exception:  # noqa: BLE001
+                pass
+        # single block, or alignment drift/failure -> translate each block individually
+        res = []
+        for idx, s in batch:
+            try:
+                res.append((idx, _api(s), True))
+            except Exception:  # noqa: BLE001
+                res.append((idx, texts[idx], False))
+        return res
+
+    if batches:
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(batches)))) as ex:
+            for res in ex.map(_do_batch, batches):
+                for idx, val, ok in res:
+                    out[idx] = val
+                    if not ok:
+                        failed.add(idx)
+    return out, failed, last_err["v"]
+
+
+def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_path=None, ocr=False, post_edit=False, engine="sarvam"):
+    """Translate a PDF in place (layout-preserved). Returns a report dict.
+
+    Two phases for speed: (1) extract ALL text blocks and translate them with concurrent batched
+    calls; (2) render the overlays per page. engine="llm" translates directly via the hosted LLM
+    (Sarvam — no GPU, no cold start, fluent in one pass); engine="indictrans" uses the Modal NMT
+    draft + optional LLM post-edit. Both run the network calls in parallel so the doc finishes fast."""
     font_path = font_path or resolve_font(target)
+    # Pre-warm a self-hosted (scale-to-zero) post-edit endpoint so its cold start overlaps with
+    # extraction + NMT. No-op for hosted APIs (always warm). Best-effort, background thread.
+    if engine == "indictrans" and post_edit:
+        try:
+            import threading
+            import llm_postedit
+
+            threading.Thread(target=llm_postedit.warmup, daemon=True).start()
+        except Exception:
+            pass
     doc = fitz.open(in_path)
     pages = parse_pages(pages_spec, doc.page_count)
     report = {
@@ -303,9 +476,36 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
         "pages": [],
     }
 
+    # ---- Phase 1: extract every text block, translate them ALL in batched requests ----
+    page_blocks = {pi: extract_text_blocks(doc[pi]) for pi in pages}
+    flat_src, flat_idx = [], []
+    for pi in pages:
+        for bi, (_r, t, _s, _c) in enumerate(page_blocks[pi]):
+            flat_src.append(t)
+            flat_idx.append((pi, bi))
+
+    if engine == "sarvam":
+        flat_tr, failed_flat, translate_err = _sarvam_translate(flat_src, target)
+    elif engine == "llm":
+        import llm_postedit
+
+        flat_tr, failed_flat, translate_err = llm_postedit.translate_batch(flat_src, target)
+    else:  # indictrans (Modal NMT) + optional LLM post-edit
+        flat_tr, failed_flat, translate_err = _batch_translate(flat_src, target, service_url)
+        if post_edit and flat_src and len(failed_flat) < len(flat_src):
+            flat_tr = apply_postedit(flat_src, flat_tr, target)
+
+    page_tr = {pi: [None] * len(page_blocks[pi]) for pi in pages}
+    page_failed = {pi: False for pi in pages}
+    for k, (pi, bi) in enumerate(flat_idx):
+        page_tr[pi][bi] = flat_tr[k]
+        if k in failed_flat:
+            page_failed[pi] = True
+
+    # ---- Phase 2: render overlays per page (layout-preserved; CPU-only, fast) ----
     for pi in pages:
         page = doc[pi]
-        blocks = extract_text_blocks(page)
+        blocks = page_blocks[pi]
         info = {"page": pi + 1, "blocks": len(blocks), "overflow": 0}
         if not blocks:
             report["imageTextPages"] += 1
@@ -321,20 +521,10 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
             report["pages"].append(info)
             continue
 
-        src = [t for _, t, _, _ in blocks]
-        translations, last_err = None, ""
-        for _ in range(2):
-            try:
-                translations = translate_via_service(src, target, service_url)
-                break
-            except Exception as ex:  # noqa: BLE001
-                last_err = str(ex)
-        if translations is None:
-            translations = src
-            info["translateError"] = last_err[:200]
+        translations = page_tr[pi]
+        if page_failed[pi]:
+            info["translateError"] = (translate_err or "translate failed")[:200]
             report["failedPages"] += 1
-        elif post_edit:
-            translations = apply_postedit(src, translations, target)
 
         for rect, _t, _s, _c in blocks:
             page.add_redact_annot(rect)
