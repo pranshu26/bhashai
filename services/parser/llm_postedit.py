@@ -1,13 +1,19 @@
-"""LLM post-edit: refine IndicTrans2 drafts into fluent, correct target-language text.
+"""LLM post-edit: refine the draft translation into fluent, teacher-grade target-language text.
 
-Default backend is a self-hosted Sarvam-M (24B, Indic-specialised) served OpenAI-compatibly on
-Modal (set LLM_BASE_URL=https://...modal.run/v1, LLM_MODEL=sarvam-m). Falls back to Anthropic /
-OpenAI if their keys are set instead. Chunks are refined CONCURRENTLY; on any error or shape
-mismatch it falls back to the draft (never drops or corrupts content)."""
+Default backend is an OpenAI-compatible chat endpoint set via LLM_BASE_URL + LLM_API_KEY + LLM_MODEL
+(e.g. Groq's free Llama-3.3-70B: https://api.groq.com/openai/v1). Falls back to Anthropic/OpenAI by
+key. The refine pass enforces terminology consistency + meaning fidelity (it fixed inconsistent
+terms, reversed examples, and meaning drift that the raw MT draft produced). Chunks run
+concurrently; on any error/shape-mismatch it falls back to the draft (never drops content)."""
 import json
 import os
+import random
+import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+
+_UA = "bhashai/1.0 (+translation-service)"  # some hosts (Groq/Cloudflare) 403 the default urllib UA
 
 _LANG_NAMES = {
     "hi": "Hindi", "mr": "Marathi", "bn": "Bengali", "pa": "Punjabi", "gu": "Gujarati",
@@ -17,16 +23,16 @@ _LANG_NAMES = {
 
 
 def _provider_cfg():
-    """Returns (kind, key, model, base_url). kind is 'openai' (OpenAI-compatible — incl. self-hosted
-    vLLM/Sarvam-M) or 'anthropic'. Prefers the self-hosted endpoint when LLM_BASE_URL is set."""
-    base = os.environ.get("LLM_BASE_URL")  # e.g. https://<you>--bhashai-sarvam-serve.modal.run/v1
+    """Returns (kind, key, model, base_url). kind is 'openai' (OpenAI-compatible — Groq/vLLM/OpenAI)
+    or 'anthropic'. Prefers the configured OpenAI-compatible endpoint when LLM_BASE_URL is set."""
+    base = os.environ.get("LLM_BASE_URL")  # e.g. https://api.groq.com/openai/v1
     model = os.environ.get("LLM_MODEL") or None
     a = os.environ.get("ANTHROPIC_API_KEY")
     o = os.environ.get("OPENAI_API_KEY")
     prov = os.environ.get("LLM_PROVIDER", "").lower()
 
-    if base and prov != "anthropic":  # self-hosted Sarvam-M / any OpenAI-compatible endpoint
-        return ("openai", os.environ.get("LLM_API_KEY", "EMPTY"), model or "sarvam-m", base.rstrip("/"))
+    if base and prov != "anthropic":  # Groq / any OpenAI-compatible endpoint
+        return ("openai", os.environ.get("LLM_API_KEY", "EMPTY"), model or "llama-3.3-70b-versatile", base.rstrip("/"))
     if prov == "anthropic" and a:
         return ("anthropic", a, model or "claude-sonnet-4-6", None)
     if prov == "openai" and o:
@@ -42,25 +48,40 @@ def is_enabled() -> bool:
     return _provider_cfg()[0] is not None
 
 
+def _http_json(url, body, headers, timeout):
+    """POST JSON with retry/backoff on rate-limit (429) / 5xx. Adds a real User-Agent."""
+    headers = {**headers, "user-agent": _UA}
+    for attempt in range(5):
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as ex:
+            if ex.code in (429, 500, 502, 503, 504) and attempt < 4:
+                time.sleep(min(20.0, 1.5 * (2 ** attempt)) + random.random())
+                continue
+            raise
+        except Exception:  # noqa: BLE001 -- transient network
+            if attempt < 4:
+                time.sleep(1.0 + random.random())
+                continue
+            raise
+    raise RuntimeError("unreachable")
+
+
 def warmup() -> None:
-    """Best-effort: fire a 1-token request to spin up a scale-to-zero endpoint so its cold start
-    overlaps with the (concurrent) NMT phase. No-op for hosted APIs or when disabled. Call this in
-    a daemon thread at the start of a translation."""
+    """Best-effort: spin up a scale-to-zero self-hosted endpoint so its cold start overlaps the NMT
+    phase. No-op for hosted APIs (Groq etc., always warm) or when disabled."""
     kind, key, model, base_url = _provider_cfg()
     if kind != "openai" or not base_url or not any(h in base_url for h in ("modal.run", "localhost", "127.0.0.1")):
-        return  # only a self-hosted (scale-to-zero) endpoint benefits; hosted APIs are always warm
+        return
     try:
-        payload = {
-            "model": model, "max_tokens": 1, "temperature": 0,
-            "messages": [{"role": "user", "content": "ok"}],
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-        req = urllib.request.Request(
-            base_url.rstrip("/") + "/chat/completions", data=json.dumps(payload).encode(),
-            headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=900).read()  # wait out the cold start
-    except Exception:
+        payload = {"model": model, "max_tokens": 1, "temperature": 0,
+                   "messages": [{"role": "user", "content": "ok"}],
+                   "chat_template_kwargs": {"enable_thinking": False}}
+        _http_json(base_url.rstrip("/") + "/chat/completions", json.dumps(payload).encode(),
+                   {"authorization": f"Bearer {key}", "content-type": "application/json"}, timeout=900)
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -70,33 +91,44 @@ def _call_llm(system: str, user: str, kind: str, key: str, model: str, base_url:
             "model": model, "max_tokens": max_tokens, "temperature": 0.2,
             "system": system, "messages": [{"role": "user", "content": user}],
         }).encode()
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages", data=body,
-            headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=120) as r:
-            d = json.loads(r.read())
-            return "".join(c.get("text", "") for c in d["content"] if c.get("type") == "text")
+        d = _http_json("https://api.anthropic.com/v1/messages", body,
+                       {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, 120)
+        return "".join(c.get("text", "") for c in d["content"] if c.get("type") == "text")
 
-    # OpenAI-compatible: real OpenAI or self-hosted vLLM (Sarvam-M).
+    # OpenAI-compatible: Groq / OpenAI / self-hosted vLLM.
     payload = {
         "model": model, "max_tokens": max_tokens, "temperature": 0.2,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
     }
     if any(h in base_url for h in ("modal.run", "localhost", "127.0.0.1")):
-        # Self-hosted vLLM: disable the hybrid "thinking" mode so it returns the JSON array directly.
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+        payload["chat_template_kwargs"] = {"enable_thinking": False}  # self-hosted vLLM thinking off
     elif "api.sarvam.ai" in base_url:
-        # Sarvam keeps reasoning in a separate field (content stays clean). Use the minimum reasoning
-        # effort: faster + cheaper + leaves room under the tier's max_tokens cap. ('none' is rejected.)
         payload["reasoning_effort"] = "low"
-    req = urllib.request.Request(
-        base_url.rstrip("/") + "/chat/completions", data=json.dumps(payload).encode(),
-        headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
+    d = _http_json(base_url.rstrip("/") + "/chat/completions", json.dumps(payload).encode(),
+                   {"authorization": f"Bearer {key}", "content-type": "application/json"}, 180)
+    return d["choices"][0]["message"].get("content") or ""
+
+
+def _refine_system(lang, target_code):
+    rules = (
+        "- Keep terminology, acronyms, and proper nouns CONSISTENT throughout: pick ONE rendering for "
+        "each term and reuse it everywhere (never vary, e.g. don't mix forms of 'AI').\n"
+        "- Preserve the EXACT meaning, especially examples, comparisons, numbers, dates, URLs and "
+        "symbols — never reorder, swap, or invert them.\n"
+        "- Translate any English still left in the draft, except URLs, proper nouns, and "
+        "fill-in-the-blank markers (lines of underscores)."
     )
-    with urllib.request.urlopen(req, timeout=180) as r:
-        d = json.loads(r.read())
-        return d["choices"][0]["message"]["content"]
+    glossary = os.environ.get("TRANSLATION_GLOSSARY", "")
+    if not glossary and target_code == "hi":
+        glossary = "AI=एआई; prompt=प्रॉम्प्ट; internet=इंटरनेट; website=वेबसाइट; search engine=सर्च इंजन; email=ईमेल; password=पासवर्ड; online=ऑनलाइन; computer=कंप्यूटर"
+    gloss = f"\n- Prefer these {lang} renderings for key terms: {glossary}" if glossary else ""
+    return (
+        f"You are a senior {lang} editor for school/teacher educational materials. You receive English "
+        f"source lines and their draft {lang} translations. Rewrite each draft into fluent, natural, "
+        f"correct {lang} a teacher can use directly.\n{rules}{gloss}\n"
+        f"Return ONLY a JSON array of strings — the refined {lang} translations, same order and same "
+        f"count. No prose, no markdown."
+    )
 
 
 def _refine_chunk(chunk, system, kind, key, model, base_url):
@@ -108,27 +140,21 @@ def _refine_chunk(chunk, system, kind, key, model, base_url):
         arr = json.loads(raw[start : end + 1]) if start >= 0 and end > start else None
         if isinstance(arr, list) and len(arr) == len(chunk):
             return [str(x) for x in arr]
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return [d for _, d in chunk]  # fall back to the draft (never drop content)
 
 
-def post_edit_batch(pairs, target_code, batch_size=10, max_workers=None):
+def post_edit_batch(pairs, target_code, batch_size=12, max_workers=None):
     """pairs: list of (source_en, draft). Returns refined list (same order). Chunks are refined
-    concurrently (each chunk = one LLM call) so wall-clock stays low on large documents."""
+    concurrently; bigger batches keep the doc consistent and cut call count."""
     kind, key, model, base_url = _provider_cfg()
     if kind is None or not pairs:
         return [d for _, d in pairs]
     if max_workers is None:
-        max_workers = int(os.environ.get("POST_EDIT_CONCURRENCY", "8"))
-    lang = _LANG_NAMES.get(target_code, target_code)
-    system = (
-        f"You are a senior {lang} editor. You receive English source lines and their draft {lang} "
-        f"translations. Rewrite each draft so it is fluent, natural, and correct {lang}, preserving "
-        f"the exact meaning, numbers, names, citations, and any English terms/acronyms. Do not add or "
-        f"drop content. Return ONLY a JSON array of strings — the refined {lang} translations, same "
-        f"order and same count. No prose, no markdown."
-    )
+        max_workers = int(os.environ.get("POST_EDIT_CONCURRENCY", "6"))
+    batch_size = int(os.environ.get("POST_EDIT_BATCH", batch_size))
+    system = _refine_system(_LANG_NAMES.get(target_code, target_code), target_code)
     chunks = [pairs[i : i + batch_size] for i in range(0, len(pairs), batch_size)]
     if len(chunks) <= 1:
         return _refine_chunk(chunks[0], system, kind, key, model, base_url) if chunks else []
@@ -142,15 +168,13 @@ def post_edit_batch(pairs, target_code, batch_size=10, max_workers=None):
 
 
 def translate_batch(texts, target_code, batch_size=8, max_workers=None):
-    """Translate English `texts` -> target language directly via the chat LLM (Sarvam). Returns
-    (translations, failed_index_set, last_err) — same shape as overlay._batch_translate so the PDF
-    pipeline can swap engines transparently. Chunks run concurrently; the LLM produces fluent output
-    in one pass, so no separate post-edit is needed. Falls back to source text on error/mismatch."""
+    """Translate English `texts` -> target language directly via the chat LLM. Returns
+    (translations, failed_index_set, last_err) — same shape as overlay._batch_translate."""
     kind, key, model, base_url = _provider_cfg()
     if kind is None or not texts:
         return list(texts), (set(range(len(texts))) if texts else set()), None
     if max_workers is None:
-        max_workers = int(os.environ.get("POST_EDIT_CONCURRENCY", "8"))
+        max_workers = int(os.environ.get("POST_EDIT_CONCURRENCY", "6"))
     lang = _LANG_NAMES.get(target_code, target_code)
     system = (
         f"You are an expert English->{lang} translator for official and educational documents. "
@@ -177,7 +201,7 @@ def translate_batch(texts, target_code, batch_size=8, max_workers=None):
                 return (start, [str(x) for x in arr], True)
         except Exception as ex:  # noqa: BLE001
             last_err["v"] = str(ex)
-        return (start, list(chunk), False)  # fall back to source for this chunk
+        return (start, list(chunk), False)
 
     if len(chunks) <= 1:
         results = [_do(chunks[0])] if chunks else []

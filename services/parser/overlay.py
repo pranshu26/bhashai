@@ -512,6 +512,10 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
     _write_progress(0, len(flat_src))
     if engine == "sarvam":
         flat_tr, failed_flat, translate_err = _sarvam_translate(flat_src, target, on_progress=_write_progress)
+        import llm_postedit  # teacher-grade refine pass (term consistency + meaning fidelity)
+
+        if llm_postedit.is_enabled() and flat_src and len(failed_flat) < len(flat_src):
+            flat_tr = apply_postedit(flat_src, flat_tr, target)
     elif engine == "llm":
         import llm_postedit
 
@@ -619,6 +623,10 @@ def translate_docx(in_path, out_path, target, engine="sarvam", progress_path=Non
     _wp(0, len(texts))
     if engine == "sarvam":
         tr, failed, _err = _sarvam_translate(texts, target, on_progress=_wp)
+        import llm_postedit  # teacher-grade refine pass (term consistency + meaning fidelity)
+
+        if llm_postedit.is_enabled() and len(failed) < len(texts):
+            tr = apply_postedit(texts, tr, target)
     elif engine == "llm":
         import llm_postedit
 
