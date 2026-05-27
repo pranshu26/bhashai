@@ -460,16 +460,27 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
     """Translate a PDF in place (layout-preserved). Returns a report dict.
 
     Two phases for speed: (1) extract ALL text blocks and translate them with concurrent batched
-    calls; (2) render the overlays per page. engine="llm" translates directly via the hosted LLM
-    (Sarvam — no GPU, no cold start, fluent in one pass); engine="indictrans" uses the Modal NMT
-    draft + optional LLM post-edit. Both run the network calls in parallel so the doc finishes fast."""
+    calls; (2) render the overlays per page.
+
+    engine values:
+      "llm"            — direct LLM translation (single pass; current production default)
+      "sarvam"         — Sarvam Translate API draft + LLM refine (auto when LLM configured)
+      "indictrans"     — IndicTrans2 NMT draft + LLM refine (only when post_edit=True)
+      "indictrans+llm" — explicit two-pass; ERRORS if LLM is not configured
+    """
     font_path = font_path or resolve_font(target)
+    import llm_postedit
+    require_llm = engine.endswith("+llm")
+    if require_llm and not llm_postedit.is_enabled():
+        raise RuntimeError(f"engine={engine!r} requires an LLM (LLM_BASE_URL + LLM_API_KEY)")
+    if require_llm:
+        post_edit = True
+    nmt_engine = engine.split("+", 1)[0]
     # Pre-warm a self-hosted (scale-to-zero) post-edit endpoint so its cold start overlaps with
     # extraction + NMT. No-op for hosted APIs (always warm). Best-effort, background thread.
-    if engine == "indictrans" and post_edit:
+    if nmt_engine == "indictrans" and post_edit:
         try:
             import threading
-            import llm_postedit
 
             threading.Thread(target=llm_postedit.warmup, daemon=True).start()
         except Exception:
@@ -510,17 +521,13 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
             pass
 
     _write_progress(0, len(flat_src))
-    if engine == "sarvam":
+    if nmt_engine == "sarvam":
         flat_tr, failed_flat, translate_err = _sarvam_translate(flat_src, target, on_progress=_write_progress)
-        import llm_postedit  # teacher-grade refine pass (term consistency + meaning fidelity)
-
         if llm_postedit.is_enabled() and flat_src and len(failed_flat) < len(flat_src):
             flat_tr = apply_postedit(flat_src, flat_tr, target)
-    elif engine == "llm":
-        import llm_postedit
-
+    elif nmt_engine == "llm":
         flat_tr, failed_flat, translate_err = llm_postedit.translate_batch(flat_src, target)
-    else:  # indictrans (Modal NMT) + optional LLM post-edit
+    else:  # indictrans (NMT) + optional LLM post-edit
         flat_tr, failed_flat, translate_err = _batch_translate(flat_src, target, service_url)
         if post_edit and flat_src and len(failed_flat) < len(flat_src):
             flat_tr = apply_postedit(flat_src, flat_tr, target)
@@ -620,12 +627,21 @@ def _in_hyperlink(node):
     return False
 
 
-def translate_docx(in_path, out_path, target, engine="sarvam", progress_path=None):
+def translate_docx(in_path, out_path, target, engine="sarvam", post_edit=None, progress_path=None):
     """Translate a .docx in place, preserving structure. Works paragraph-level: gather the FULL
     visible text of each paragraph from all its <w:t> nodes (incl. tracked-change <w:ins> and
     hyperlink runs), translate it as one unit (best context), then write the whole translation into
     one carrier text node and blank the rest so styles/lists/headings/tables survive. Covers body,
-    tables, and headers/footers. Returns a report dict."""
+    tables, and headers/footers. Returns a report dict.
+
+    engine values:
+      "llm"           — direct LLM translation (single pass; current production default)
+      "sarvam"        — Sarvam Translate API draft + optional LLM refine
+      "indictrans"    — IndicTrans2 NMT draft + optional LLM refine
+      "indictrans+llm" — explicit two-pass; ERRORS if LLM is not configured
+
+    post_edit: None = auto (on when LLM is configured), True/False to force.
+    """
     from docx import Document
     from docx.oxml.ns import qn
 
@@ -663,18 +679,24 @@ def translate_docx(in_path, out_path, target, engine="sarvam", progress_path=Non
             pass
 
     _wp(0, len(texts))
-    if engine == "sarvam":
+    import llm_postedit  # teacher-grade refine pass (term consistency + meaning fidelity)
+
+    require_llm = engine.endswith("+llm")
+    if require_llm and not llm_postedit.is_enabled():
+        raise RuntimeError(f"engine={engine!r} requires an LLM (LLM_BASE_URL + LLM_API_KEY)")
+    auto_post_edit = llm_postedit.is_enabled() if post_edit is None else post_edit
+
+    nmt_engine = engine.split("+", 1)[0]
+    if nmt_engine == "sarvam":
         tr, failed, _err = _sarvam_translate(texts, target, on_progress=_wp)
-        import llm_postedit  # teacher-grade refine pass (term consistency + meaning fidelity)
-
-        if llm_postedit.is_enabled() and len(failed) < len(texts):
+        if auto_post_edit and len(failed) < len(texts):
             tr = apply_postedit(texts, tr, target)
-    elif engine == "llm":
-        import llm_postedit
-
+    elif nmt_engine == "llm":
         tr, failed, _err = llm_postedit.translate_batch(texts, target)
-    else:
+    else:  # "indictrans" (or "indictrans+llm")
         tr, failed, _err = _batch_translate(texts, target, os.environ.get("INDICTRANS_SERVICE_URL", ""))
+        if auto_post_edit and len(failed) < len(texts):
+            tr = apply_postedit(texts, tr, target)
 
     space = qn("xml:space")
     for k in range(len(idx)):

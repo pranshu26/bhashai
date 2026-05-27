@@ -76,6 +76,7 @@ class TranslateDocxReq(BaseModel):
     out_path: str
     target: str
     engine: str | None = None  # None => TRANSLATE_ENGINE env
+    post_edit: bool | None = None  # None => auto (on when LLM_BASE_URL configured)
 
 
 @app.post("/translate-docx")
@@ -86,7 +87,9 @@ def translate_docx(req: TranslateDocxReq) -> dict:
     engine = TRANSLATE_ENGINE if req.engine is None else req.engine
     try:
         return overlay.translate_docx(
-            req.in_path, req.out_path, req.target, engine=engine, progress_path=req.out_path + ".progress",
+            req.in_path, req.out_path, req.target,
+            engine=engine, post_edit=req.post_edit,
+            progress_path=req.out_path + ".progress",
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, str(e))
