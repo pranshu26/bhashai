@@ -12,9 +12,6 @@ export default defineConfig({
       '@bhashai/storage': pkg('storage'),
       '@bhashai/engines': pkg('engines'),
       '@bhashai/parsing': pkg('parsing'),
-      '@bhashai/glossary': pkg('glossary'),
-      '@bhashai/qa': pkg('qa'),
-      '@bhashai/reconstruct': pkg('reconstruct'),
     },
   },
 });

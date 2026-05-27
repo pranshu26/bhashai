@@ -37,14 +37,17 @@ and NGO docs, academic content.
 
 ## What's planned but not built yet
 
-- `packages/qa/`, `packages/glossary/`, `packages/reconstruct/` — scaffolded but empty.
-  The glossary currently lives inline in `llm_postedit.py` and is enforced via the
-  translation system prompt. Automated QA scoring is not built — the pipeline reports
-  failed-block / failed-page counts and surfaces them in the UI, but there is no
-  fidelity scorer yet.
-- The engine **router** in `packages/engines/` is plaintext-only. PDF and DOCX paths go
-  straight through the Python parser. Migrating PDF/DOCX onto the router so every chunk
-  records engine + prompt + latency + cost + QA flags is on the roadmap.
+- **Automated QA scoring** — the pipeline reports failed-block and failed-page counts and
+  surfaces them in the UI, but there is no fidelity scorer (number/citation/entity
+  preservation, length anomaly, glossary violation). The `qa_flags` column and `QaFlag`
+  enum in the schema reserve space for it.
+- **DOCX reconstruction beyond paragraph-level rewrite** — translated text is written into
+  a carrier `<w:t>` and other runs in the paragraph are blanked. Mid-paragraph bold/italic
+  formatting is therefore collapsed to the carrier run's style. Per-run translation that
+  preserves intra-paragraph formatting is on the roadmap.
+- **Engine router for PDF/DOCX** — the TS router in `packages/engines/` is plaintext-only.
+  PDF and DOCX go straight through the Python parser today; migrating them onto the router
+  (so every chunk records engine + prompt + latency + cost + QA flags) is on the roadmap.
 
 ## Stack
 Next.js · NestJS · Prisma/PostgreSQL · BullMQ/Redis · AWS S3 (or local store) · Python
@@ -53,7 +56,7 @@ FastAPI (parser) · TypeScript monorepo (pnpm + Turbo).
 ## Repo layout
 ```
 apps/      api (NestJS) · worker (BullMQ) · web (Next.js)
-packages/  shared · db · storage · engines · parsing  (glossary, qa, reconstruct — scaffolded)
+packages/  shared · db · storage · engines · parsing
 services/  parser (PyMuPDF/python-docx + LLM) · indictrans (Modal NMT) · sarvam (Modal vLLM, archived)
 infra/     docker-compose · nginx · ecosystem (PM2) · deploy-ec2.sh
 docs/      architecture · deployment · quality · limitations · prompts

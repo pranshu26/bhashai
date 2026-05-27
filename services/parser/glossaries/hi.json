@@ -1,0 +1,11 @@
+[
+  { "source": "AI",            "target": "एआई" },
+  { "source": "prompt",         "target": "प्रॉम्प्ट" },
+  { "source": "internet",       "target": "इंटरनेट" },
+  { "source": "website",        "target": "वेबसाइट" },
+  { "source": "search engine",  "target": "सर्च इंजन" },
+  { "source": "email",          "target": "ईमेल" },
+  { "source": "password",       "target": "पासवर्ड" },
+  { "source": "online",         "target": "ऑनलाइन" },
+  { "source": "computer",       "target": "कंप्यूटर" }
+]

@@ -21,6 +21,28 @@ _LANG_NAMES = {
     "as": "Assamese", "ml": "Malayalam",
 }
 
+_GLOSSARY_DIR = os.path.join(os.path.dirname(__file__), "glossaries")
+
+
+def _load_glossary(target_code: str) -> str:
+    """Return the glossary as a 'source=target; source=target' string for the system prompt.
+    TRANSLATION_GLOSSARY env wins (operator can A/B without touching the repo); otherwise
+    load glossaries/<target_code>.json (schema = list of {source,target} pairs, matching
+    GlossaryPair on the TS side). Returns "" if neither exists."""
+    env = os.environ.get("TRANSLATION_GLOSSARY", "").strip()
+    if env:
+        return env
+    path = os.path.join(_GLOSSARY_DIR, f"{target_code}.json")
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            pairs = json.load(f)
+    except Exception:  # noqa: BLE001 — malformed glossary should never break translation
+        return ""
+    return "; ".join(f"{p['source']}={p['target']}" for p in pairs
+                     if isinstance(p, dict) and p.get("source") and p.get("target"))
+
 
 def _provider_cfg():
     """Returns (kind, key, model, base_url). kind is 'openai' (OpenAI-compatible — Groq/vLLM/OpenAI)
@@ -118,9 +140,7 @@ def _refine_system(lang, target_code):
         "- Translate any English still left in the draft, except URLs, proper nouns, and "
         "fill-in-the-blank markers (lines of underscores)."
     )
-    glossary = os.environ.get("TRANSLATION_GLOSSARY", "")
-    if not glossary and target_code == "hi":
-        glossary = "AI=एआई; prompt=प्रॉम्प्ट; internet=इंटरनेट; website=वेबसाइट; search engine=सर्च इंजन; email=ईमेल; password=पासवर्ड; online=ऑनलाइन; computer=कंप्यूटर"
+    glossary = _load_glossary(target_code)
     gloss = f"\n- Prefer these {lang} renderings for key terms: {glossary}" if glossary else ""
     return (
         f"You are a senior {lang} editor for school/teacher educational materials. You receive English "
@@ -177,9 +197,7 @@ def translate_batch(texts, target_code, batch_size=6, max_workers=None):
     if max_workers is None:
         max_workers = int(os.environ.get("POST_EDIT_CONCURRENCY", "6"))
     lang = _LANG_NAMES.get(target_code, target_code)
-    glossary = os.environ.get("TRANSLATION_GLOSSARY", "")
-    if not glossary and target_code == "hi":
-        glossary = "AI=एआई; prompt=प्रॉम्प्ट; internet=इंटरनेट; website=वेबसाइट; search engine=सर्च इंजन; email=ईमेल; password=पासवर्ड; online=ऑनलाइन; computer=कंप्यूटर"
+    glossary = _load_glossary(target_code)
     gloss = f"\n- Prefer these {lang} renderings for key terms: {glossary}" if glossary else ""
     system = (
         f"You are an expert English->{lang} translator for school/teacher educational materials. "
