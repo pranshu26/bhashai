@@ -1,26 +1,29 @@
-"""BhashAI translation backbone — Colab launcher (one file, no manual steps).
+"""BhashAI translation backbone — Colab + Mac launcher (one file, no manual steps).
 
-Boots IndicTrans2-1B + an Indian-tuned LLM behind a single tunneled endpoint that
-BhashAI's parser-service can hit as both LLM_BASE_URL and INDICTRANS_SERVICE_URL.
+Boots IndicTrans2-1B + Sarvam-M-24B (GGUF, served by llama.cpp) behind a single
+tunneled endpoint that BhashAI's parser-service can hit as both LLM_BASE_URL and
+INDICTRANS_SERVICE_URL.
 
-Auto-tiers the LLM by detected VRAM:
+Auto-picks a GGUF quant by detected VRAM / unified-memory:
 
-  ≥48 GB (A100-80GB / H100)   → Sarvam-M-24B  bf16   (best quality)
-  ≥18 GB (A100-40GB / L4-24)  → Sarvam-M-24B  AWQ    (good quality, ~14 GB)
-  ≥14 GB (T4-16GB / V100-16)  → Qwen-2.5-7B   AWQ    (fallback, smaller but solid)
+  ≥40 GB (A100-40/80, H100)   → Sarvam-M-24B  Q6_K     (~20 GB; best quality)
+  ≥24 GB (L4-24, RTX-3090)    → Sarvam-M-24B  Q5_K_M   (~17 GB; close to lossless)
+  ≥18 GB (A100-mig-20, …)     → Sarvam-M-24B  Q4_K_M   (~14 GB; the standard sweet spot)
+  ≥14 GB (T4-16, V100-16,M4)  → Sarvam-M-24B  Q3_K_M   (~10 GB; some quality drop)
+  < 14 GB                     → error (run a bigger GPU)
 
-Override at the top of the cell:
-  os.environ['BHASHAI_LLM_MODEL']     = 'sarvamai/sarvam-m'           # bf16 repo
-  os.environ['BHASHAI_LLM_QUANT']     = 'awq_marlin'                  # or '' for bf16
-  os.environ['BHASHAI_API_KEY']       = 'pick-something-random'
-  os.environ['HF_TOKEN']              = 'hf_xxxx'                     # required
-  os.environ['BHASHAI_TUNNEL']        = 'cloudflared'                 # or 'ngrok' if you set NGROK_AUTH_TOKEN
+Override:
+  os.environ['BHASHAI_GGUF_FILE']   = 'sarvamai_sarvam-m-Q4_K_M.gguf'   # any file in the repo
+  os.environ['BHASHAI_GGUF_REPO']   = 'bartowski/sarvamai_sarvam-m-GGUF'
+  os.environ['BHASHAI_API_KEY']     = 'pick-something-random'
+  os.environ['HF_TOKEN']            = 'hf_xxxx'                          # required
+  os.environ['BHASHAI_TUNNEL']      = 'cloudflared'                      # or 'ngrok' if NGROK_AUTH_TOKEN
 
-Usage from a Colab cell:
+Usage from a Colab cell (after making sarvam-m + indictrans2 model terms accepted on HF):
   !wget -qO - https://raw.githubusercontent.com/pranshu26/bhashai/main/infra/colab/start_backbone.py | python3 -
-or:
-  !git clone https://github.com/pranshu26/bhashai.git
-  !cd bhashai && HF_TOKEN=$HF_TOKEN python3 infra/colab/start_backbone.py
+
+Locally (Mac M-series — uses Metal automatically):
+  HF_TOKEN=hf_xxx python3 infra/colab/start_backbone.py
 
 The script blocks once everything's up. When it prints the env block, paste it into
 your BhashAI parser-service .env and restart pm2.
@@ -59,35 +62,57 @@ def _ensure_repo() -> Path:
     return Path("bhashai").resolve()
 
 
-def _detect_gpu() -> tuple[str, int]:
-    """Returns (gpu_name, vram_mib). vram_mib=0 if no GPU."""
+def _detect_compute() -> tuple[str, int]:
+    """Returns (kind, vram_mib). kind ∈ {'cuda','metal','cpu'}; vram_mib=0 if no GPU.
+
+    On Apple Silicon, unified-memory total is what matters — we report platform.mac()'s
+    `sysctl hw.memsize` so the tier picker still works."""
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
             text=True,
         ).strip().splitlines()
-        name, mem = out[0].split(",")
-        return name.strip(), int(mem.strip())
-    except Exception as e:
-        print(f"WARN: nvidia-smi failed ({e}). Running in CPU mode — Sarvam-M won't work.")
-        return "cpu", 0
+        _name, mem = out[0].split(",")
+        return "cuda", int(mem.strip())
+    except Exception:
+        pass
+
+    if sys.platform == "darwin":
+        try:
+            mem_bytes = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip())
+            return "metal", mem_bytes // (1024 * 1024)
+        except Exception:
+            pass
+
+    print("WARN: no GPU detected. CPU inference is too slow for Sarvam-M-24B — aborting.")
+    return "cpu", 0
 
 
-def _pick_model(vram_mib: int) -> tuple[str, str, str]:
-    """Returns (hf_repo, quant_arg, served_name)."""
-    override_model = os.environ.get("BHASHAI_LLM_MODEL")
-    override_quant = os.environ.get("BHASHAI_LLM_QUANT")
-    if override_model:
-        return override_model, override_quant or "", "sarvam-m"
+# (quant suffix, approx GiB on disk / VRAM at runtime)
+_GGUF_TIERS = [
+    ("Q6_K",   20),
+    ("Q5_K_M", 17),
+    ("Q4_K_M", 14),
+    ("Q3_K_M", 10),
+]
 
-    if vram_mib >= 48_000:
-        return "sarvamai/sarvam-m", "", "sarvam-m"
-    if vram_mib >= 18_000:
-        return "sarvamai/sarvam-m-awq", "awq_marlin", "sarvam-m"
-    if vram_mib >= 14_000:
-        # T4/V100 fallback — smaller model but still solid for Hindi/Marathi/Bengali
-        return "Qwen/Qwen2.5-7B-Instruct-AWQ", "awq_marlin", "qwen-7b"
-    raise SystemExit(f"GPU VRAM {vram_mib} MiB is too small. Need ≥14 GiB.")
+
+def _pick_gguf(kind: str, vram_mib: int) -> tuple[str, str]:
+    """Returns (repo_id, file_name) — picks a quant tier with ≥ 4 GiB headroom for OS + IndicTrans2."""
+    repo = os.environ.get("BHASHAI_GGUF_REPO", "bartowski/sarvamai_sarvam-m-GGUF")
+    override = os.environ.get("BHASHAI_GGUF_FILE")
+    if override:
+        return repo, override
+
+    # On Apple Silicon unified memory is shared with OS + IndicTrans2, so reserve more headroom.
+    headroom = 6_000 if kind == "metal" else 4_000
+    for quant, gib in _GGUF_TIERS:
+        if vram_mib >= gib * 1024 + headroom:
+            return repo, f"sarvamai_sarvam-m-{quant}.gguf"
+    raise SystemExit(
+        f"available memory {vram_mib} MiB is too small (need ≥{_GGUF_TIERS[-1][1] * 1024 + headroom} MiB). "
+        f"Use a bigger GPU or override BHASHAI_GGUF_FILE with a smaller IQ2/Q2 variant."
+    )
 
 
 def _setup_tunnel(port: int) -> str:
@@ -103,14 +128,29 @@ def _setup_tunnel(port: int) -> str:
         conf.get_default().auth_token = token
         return ngrok.connect(port, "http").public_url
 
-    # cloudflared — easier
+    # cloudflared — easier (no auth token, random URL on every restart)
     if not shutil.which("cloudflared"):
         print("==> Installing cloudflared")
-        _run(
-            "wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/"
-            "cloudflared-linux-amd64 -O /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared",
-            shell=True,
-        )
+        import platform
+        sysname = platform.system().lower()
+        machine = platform.machine().lower()
+        asset = {
+            ("linux",  "x86_64"):  "cloudflared-linux-amd64",
+            ("linux",  "aarch64"): "cloudflared-linux-arm64",
+            ("darwin", "arm64"):   "cloudflared-darwin-arm64.tgz",
+            ("darwin", "x86_64"):  "cloudflared-darwin-amd64.tgz",
+        }.get((sysname, machine))
+        if not asset:
+            raise SystemExit(f"unsupported platform for cloudflared: {sysname}/{machine}")
+        dest = "/usr/local/bin/cloudflared"
+        sudo = "" if os.geteuid() == 0 else "sudo "
+        url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/{asset}"
+        if asset.endswith(".tgz"):
+            _run(f"curl -sSL {url} -o /tmp/cf.tgz && tar -xzf /tmp/cf.tgz -C /tmp && "
+                 f"{sudo}mv /tmp/cloudflared {dest} && {sudo}chmod +x {dest}", shell=True)
+        else:
+            _run(f"curl -sSL {url} -o /tmp/cloudflared && {sudo}install -m 0755 /tmp/cloudflared {dest}",
+                 shell=True)
     print("==> Starting cloudflared quick tunnel")
     proc = subprocess.Popen(
         ["cloudflared", "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"],
@@ -154,19 +194,27 @@ def main() -> int:
 
     api_key = os.environ.setdefault("BHASHAI_API_KEY", secrets.token_hex(16))
 
-    print("==> Detecting GPU")
-    gpu_name, vram = _detect_gpu()
-    print(f"   GPU: {gpu_name}  VRAM: {vram} MiB")
+    print("==> Detecting compute")
+    kind, vram = _detect_compute()
+    print(f"   kind: {kind}  available memory: {vram} MiB")
+    if kind == "cpu":
+        raise SystemExit("no GPU/Metal — aborting")
 
-    llm_repo, llm_quant, served = _pick_model(vram)
-    print(f"   LLM: {llm_repo}  quant={llm_quant or 'bf16'}  served-as={served}")
+    gguf_repo, gguf_file = _pick_gguf(kind, vram)
+    print(f"   LLM:    {gguf_repo} :: {gguf_file}")
+    served = "sarvam-m"
 
     repo = _ensure_repo()
     indictrans_dir = repo / "services" / "indictrans"
 
-    print("==> Installing Python deps (vLLM + transformers + IndicTransToolkit + FastAPI)")
+    print("==> Installing Python deps (llama-cpp-python + transformers + IndicTransToolkit + FastAPI)")
+    # llama-cpp-python: pre-built CUDA wheels for Colab speed, default Metal on macOS.
+    extra = []
+    if kind == "cuda":
+        # CUDA 12.4 wheel index covers the Colab DLAMI driver bundle (Colab usually ships CUDA 12.x).
+        extra = ["--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cu124"]
+    _run([sys.executable, "-m", "pip", "install", "-q", "llama-cpp-python[server]", *extra])
     _pip_install(
-        "vllm==0.6.6",
         "torch>=2.4,<2.6",
         "transformers>=4.44,<5",
         "sentencepiece",
@@ -175,24 +223,33 @@ def main() -> int:
         "uvicorn[standard]>=0.32",
         "httpx>=0.27",
         "pydantic>=2.9",
+        "huggingface_hub",
     )
 
     print("==> Pre-downloading models (parallel)")
     import concurrent.futures as cf
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    def _dl_gguf() -> str:
+        return hf_hub_download(gguf_repo, gguf_file, token=os.environ["HF_TOKEN"])
+
     with cf.ThreadPoolExecutor(max_workers=2) as ex:
         f1 = ex.submit(snapshot_download, "ai4bharat/indictrans2-en-indic-1B", token=os.environ["HF_TOKEN"])
-        f2 = ex.submit(snapshot_download, llm_repo, token=os.environ["HF_TOKEN"])
-        for f, name in [(f1, "IndicTrans2-1B"), (f2, llm_repo)]:
+        f2 = ex.submit(_dl_gguf)
+        gguf_path = None
+        for f, name in [(f1, "IndicTrans2-1B"), (f2, f"{gguf_repo}/{gguf_file}")]:
             try:
-                f.result()
-                print(f"   ✓ {name}")
+                r = f.result()
+                if f is f2:
+                    gguf_path = r
+                print(f"   ✓ {name}  ({r})")
             except Exception as e:
-                if name == llm_repo and "awq" in llm_repo.lower():
-                    print(f"   ✗ {name} — repo not found.")
-                    print("     Either set BHASHAI_LLM_MODEL=sarvamai/sarvam-m and BHASHAI_LLM_QUANT='' "
-                          "(needs ≥48 GiB VRAM), or pick a different AWQ repo.")
+                print(f"   ✗ {name} — {e}")
+                if f is f2:
+                    print("     Set BHASHAI_GGUF_FILE to a smaller quant from this repo:")
+                    print(f"     https://huggingface.co/{gguf_repo}/tree/main")
                 raise
+    assert gguf_path
 
     print("==> Starting IndicTrans2 server on :8001")
     env_it = {
@@ -206,23 +263,23 @@ def main() -> int:
         cwd=str(indictrans_dir), env=env_it,
     )
 
-    print(f"==> Starting vLLM on :8002 (model={llm_repo})")
-    vllm_cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-        "--model", llm_repo,
-        "--served-model-name", served,
+    print(f"==> Starting llama.cpp server on :8002 ({gguf_file})")
+    llama_cmd = [
+        sys.executable, "-m", "llama_cpp.server",
+        "--model", gguf_path,
         "--host", "127.0.0.1", "--port", "8002",
-        "--max-model-len", "8192",
-        "--gpu-memory-utilization", "0.80",
-        "--enforce-eager",
-        "--disable-log-requests",
+        "--n_ctx", "8192",
+        "--n_gpu_layers", "-1",       # offload all layers to GPU/Metal
+        "--model_alias", served,
     ]
-    if llm_quant:
-        vllm_cmd += ["--quantization", llm_quant]
-    vllm_proc = subprocess.Popen(vllm_cmd, env={**os.environ, "HF_TOKEN": os.environ["HF_TOKEN"]})
+    if kind == "metal":
+        llama_cmd += ["--n_batch", "256"]   # Metal: smaller batch keeps unified mem fits
+    else:
+        llama_cmd += ["--n_batch", "512"]
+    vllm_proc = subprocess.Popen(llama_cmd, env={**os.environ})
 
-    _wait_http("http://127.0.0.1:8001/health", "IndicTrans2", timeout=300)
-    _wait_http("http://127.0.0.1:8002/v1/models", "vLLM (Sarvam-M)", timeout=900)
+    _wait_http("http://127.0.0.1:8001/health", "IndicTrans2", timeout=600)
+    _wait_http("http://127.0.0.1:8002/v1/models", "llama.cpp (Sarvam-M)", timeout=900)
 
     print("==> Starting auth/proxy on :8080")
     proxy_script = Path("/tmp/bhashai_proxy.py")

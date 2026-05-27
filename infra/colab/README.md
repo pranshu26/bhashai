@@ -19,12 +19,12 @@ can swap the URL between Colab and AWS without changing code.
 ## Setup (~5 min)
 
 1. Open https://colab.new in a new tab.
-2. **Runtime → Change runtime type → A100 GPU** (Colab Pro+) or **L4 GPU** (Colab Pro).
-   - Free T4 will work with a fallback model (Qwen-2.5-7B AWQ) but Sarvam-M-24B
-     needs ≥18 GB VRAM (AWQ) or ≥48 GB (bf16).
+2. **Runtime → Change runtime type → A100 GPU** (Pro+) or **L4 GPU** (Pro) or **T4** (free).
+   All three tiers work — the launcher auto-picks the GGUF quant. Bigger GPU = better quality.
 3. Accept the model terms once on HuggingFace:
-   - https://huggingface.co/sarvamai/sarvam-m (and `…-awq` if it exists)
+   - https://huggingface.co/sarvamai/sarvam-m
    - https://huggingface.co/ai4bharat/indictrans2-en-indic-1B
+   - https://huggingface.co/bartowski/sarvamai_sarvam-m-GGUF (un-gated, but log in anyway)
 4. Create an HF read token: https://huggingface.co/settings/tokens
 5. Paste this into the first Colab cell and run:
 
@@ -32,11 +32,10 @@ can swap the URL between Colab and AWS without changing code.
 import os
 os.environ["HF_TOKEN"] = "hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # your HF read token
 
-# Optional overrides:
-# os.environ["BHASHAI_LLM_MODEL"] = "sarvamai/sarvam-m-awq"     # AWQ if it exists; else "sarvamai/sarvam-m"
-# os.environ["BHASHAI_LLM_QUANT"] = "awq_marlin"                # or "" for bf16
+# Optional overrides (all have sensible defaults):
+# os.environ["BHASHAI_GGUF_FILE"] = "sarvamai_sarvam-m-Q4_K_M.gguf"   # force a specific quant
 # os.environ["BHASHAI_API_KEY"]   = "pick-anything-long-and-random"
-# os.environ["BHASHAI_TUNNEL"]    = "cloudflared"               # or "ngrok" (needs NGROK_AUTH_TOKEN)
+# os.environ["BHASHAI_TUNNEL"]    = "cloudflared"                     # or "ngrok" (needs NGROK_AUTH_TOKEN)
 
 !wget -qO - https://raw.githubusercontent.com/pranshu26/bhashai/main/infra/colab/start_backbone.py | python3 -
 ```
@@ -64,16 +63,21 @@ Then on your EC2 box (16.171.29.33):
 pm2 restart bhashai-parser bhashai-worker
 ```
 
-## VRAM tiers (auto-picked)
+## VRAM tiers (auto-picked, llama.cpp + bartowski/sarvamai_sarvam-m-GGUF)
 
-| VRAM      | GPU examples                | LLM                   | Quality |
-|-----------|-----------------------------|-----------------------|---------|
-| ≥ 48 GiB | A100-80GB, H100             | Sarvam-M-24B  bf16    | Best    |
-| ≥ 18 GiB | A100-40GB, L4-24GB          | Sarvam-M-24B  AWQ     | Strong  |
-| ≥ 14 GiB | T4-16GB, V100-16GB          | Qwen-2.5-7B  AWQ      | OK (Hindi/Marathi/Bengali decent; Tamil/Telugu/Kannada/Malayalam noticeably weaker) |
+| Memory     | GPU examples                | Quant     | Quality |
+|------------|-----------------------------|-----------|---------|
+| ≥ 40 GiB  | A100-40/80, H100, MI300     | Q6_K      | Best, ≈ bf16 |
+| ≥ 24 GiB  | L4-24, RTX-3090, MI100      | Q5_K_M    | Near-lossless |
+| ≥ 18 GiB  | A100-mig-20                 | Q4_K_M    | The standard sweet spot |
+| ≥ 14 GiB  | T4-16, V100-16, **M4 16 GB**| Q3_K_M    | Some quality drop; functional |
+| < 14 GiB  | —                            | —         | error — too small for 24B |
 
-Override with `BHASHAI_LLM_MODEL` + `BHASHAI_LLM_QUANT` env vars if you want a
-specific repo.
+Override with `BHASHAI_GGUF_FILE` (any file in `bartowski/sarvamai_sarvam-m-GGUF`) if
+you want a specific quant; full list at <https://huggingface.co/bartowski/sarvamai_sarvam-m-GGUF/tree/main>.
+
+The same launcher runs on **Apple Silicon (M-series)** via Metal — useful for a quick
+local quality sanity-check before deploying to Colab or AWS.
 
 ## Caveats
 
