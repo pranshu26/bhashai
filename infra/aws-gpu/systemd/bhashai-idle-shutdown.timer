@@ -1,0 +1,10 @@
+[Unit]
+Description=Run BhashAI idle-shutoff check every 10 min
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+Unit=bhashai-idle-shutdown.service
+
+[Install]
+WantedBy=timers.target

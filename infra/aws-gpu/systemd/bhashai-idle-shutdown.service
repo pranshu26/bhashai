@@ -1,0 +1,16 @@
+[Unit]
+Description=BhashAI idle-shutdown — power off the instance after IDLE_MINUTES with no nginx hits
+
+[Service]
+Type=oneshot
+Environment=IDLE_MINUTES=30
+Environment=ACCESS_LOG=/var/log/nginx/access.log
+ExecStart=/bin/bash -c '\
+  THRESHOLD=$((IDLE_MINUTES * 60)); \
+  if [ ! -f "$ACCESS_LOG" ]; then exit 0; fi; \
+  LAST=$(stat -c %Y "$ACCESS_LOG" 2>/dev/null || stat -f %m "$ACCESS_LOG"); \
+  AGE=$(( $(date +%s) - LAST )); \
+  if [ "$AGE" -gt "$THRESHOLD" ]; then \
+    echo "Idle ${AGE}s > ${THRESHOLD}s — shutting down"; \
+    /sbin/shutdown -h +1 "BhashAI auto-shutoff: idle ${AGE}s"; \
+  fi'
