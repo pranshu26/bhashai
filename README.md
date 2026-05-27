@@ -6,8 +6,15 @@ asynchronous and queue-driven. Built for school/teacher educational materials, g
 and NGO docs, academic content.
 
 > Status: **in production.** Live at `http://16.171.29.33/` (single EC2 box, eu-north-1).
-> Production engine: OpenRouter Qwen-2.5-72B via an OpenAI-compatible chat endpoint.
-> See [`docs/DEPLOYMENT-EC2.md`](docs/DEPLOYMENT-EC2.md) for the deploy.
+>
+> **Translation backbone (target):** two-pass — IndicTrans2-1B (AI4Bharat) NMT draft +
+> Sarvam-M-24B (Indian-tuned Mistral) LLM refine — self-hosted on one AWS L40S
+> ([`infra/aws-gpu/`](infra/aws-gpu/README.md)). Apache 2.0 + MIT, commercial-safe, no
+> per-token cost, no rate limits.
+>
+> **Translation backbone (current):** OpenAI-compatible LLM endpoint via `LLM_BASE_URL`
+> (OpenRouter Qwen-2.5-72B). Will be swapped to the self-hosted backbone above by
+> changing `TRANSLATE_ENGINE` and the endpoint URLs — no code change needed in the parser.
 
 ## What works today
 
@@ -29,11 +36,18 @@ and NGO docs, academic content.
 - **API + worker** — NestJS (`apps/api`) + BullMQ (`apps/worker`). Worker calls the parser
   via undici with `headersTimeout: 0 / bodyTimeout: 0` so long translations never hit the
   global fetch 300s timeout.
-- **Engines** — primary path is OpenAI-compatible chat (`LLM_BASE_URL` + `LLM_API_KEY` +
-  `LLM_MODEL`). `services/parser/llm_postedit.py::translate_batch` does the direct
-  translation; the same module's `post_edit_batch` does an optional teacher-grade refine
-  pass. Alternate paths: Sarvam Translate API (hosted), IndicTrans2 NMT on Modal (with
-  optional LLM post-edit), Sarvam-M 24B on Modal (`services/sarvam/`, archived).
+- **Engines** — `TRANSLATE_ENGINE` selects the path:
+  - `indictrans+llm` *(production target)* — two-pass NMT + LLM refine. Errors if no LLM
+    is configured (guards against silently shipping single-pass NMT).
+  - `llm` *(current default in prod)* — single-pass LLM translation via any
+    OpenAI-compatible endpoint.
+  - `sarvam` — Sarvam Translate API draft + LLM refine (auto when LLM configured).
+  - `indictrans` — IndicTrans2 NMT only; LLM refine via `post_edit=true`.
+- **Quality harness** — `services/parser/scripts/`:
+  - `translate_doc.py <input> <target>` — end-to-end run, JSON report, auto-verify.
+  - `verify_output.py <output.docx>` — flag mid-paragraph English leaks (the failure
+    mode that shipped past the old "is the paragraph fully English?" check).
+  - `diff_translations.py <source> <a> <b>` — markdown A/B between two engines.
 
 ## What's planned but not built yet
 
