@@ -584,11 +584,50 @@ def translate_pdf(in_path, out_path, target, service_url, pages_spec="", font_pa
     return report
 
 
+def _para_text_nodes(p):
+    """Every <w:t> belonging to this paragraph, in document order — INCLUDING runs nested in
+    <w:ins> (tracked-change insertions) and <w:hyperlink>, which python-docx's p.text / p.runs
+    silently skip (they only see direct <w:r> children). Excludes <w:delText> (struck-out
+    deletions, which use a different tag) and text inside nested paragraphs (e.g. text boxes).
+
+    This is the fix for Google-Docs "suggesting"/draft exports: their text is split across plain
+    runs and <w:ins> runs, so p.text captured only a fragment — leaving the rest untranslated
+    (whole paragraphs left in English, or English tails appended after the Hindi)."""
+    from docx.oxml.ns import qn
+
+    w_t, w_p = qn("w:t"), qn("w:p")
+    out = []
+    for t in p._p.iter(w_t):
+        anc, nested = t.getparent(), False
+        while anc is not None and anc is not p._p:  # skip <w:t> owned by a NESTED <w:p> (textbox)
+            if anc.tag == w_p:
+                nested = True
+                break
+            anc = anc.getparent()
+        if not nested:
+            out.append(t)
+    return out
+
+
+def _in_hyperlink(node):
+    from docx.oxml.ns import qn
+
+    w_hl, anc = qn("w:hyperlink"), node.getparent()
+    while anc is not None:
+        if anc.tag == w_hl:
+            return True
+        anc = anc.getparent()
+    return False
+
+
 def translate_docx(in_path, out_path, target, engine="sarvam", progress_path=None):
-    """Translate a .docx in place, preserving structure. Works paragraph-level (join the runs, get
-    one translation, write it into the first run and clear the rest) so styles/lists/headings/tables
-    survive. Covers body, tables, and headers/footers. Returns a report dict."""
+    """Translate a .docx in place, preserving structure. Works paragraph-level: gather the FULL
+    visible text of each paragraph from all its <w:t> nodes (incl. tracked-change <w:ins> and
+    hyperlink runs), translate it as one unit (best context), then write the whole translation into
+    one carrier text node and blank the rest so styles/lists/headings/tables survive. Covers body,
+    tables, and headers/footers. Returns a report dict."""
     from docx import Document
+    from docx.oxml.ns import qn
 
     doc = Document(in_path)
     paras = list(doc.paragraphs)
@@ -600,11 +639,14 @@ def translate_docx(in_path, out_path, target, engine="sarvam", progress_path=Non
         for hf in (section.header, section.footer):
             paras.extend(hf.paragraphs)
 
-    idx, texts = [], []
+    idx, texts, nodes_per = [], [], []
     for i, p in enumerate(paras):
-        if p.text and p.text.strip():
+        tnodes = _para_text_nodes(p)
+        full = "".join(t.text or "" for t in tnodes)
+        if full.strip():
             idx.append(i)
-            texts.append(p.text)
+            texts.append(full)
+            nodes_per.append(tnodes)
 
     report = {"blocksTranslated": len(texts), "failedBlocks": 0, "failedPages": 0, "failedPageNumbers": []}
     if not texts:
@@ -634,14 +676,17 @@ def translate_docx(in_path, out_path, target, engine="sarvam", progress_path=Non
     else:
         tr, failed, _err = _batch_translate(texts, target, os.environ.get("INDICTRANS_SERVICE_URL", ""))
 
-    for k, i in enumerate(idx):
-        p = paras[i]
-        if p.runs:
-            p.runs[0].text = tr[k]
-            for r in p.runs[1:]:
-                r.text = ""
-        else:
-            p.text = tr[k]
+    space = qn("xml:space")
+    for k in range(len(idx)):
+        tnodes = nodes_per[k]
+        # carrier = first text node NOT inside a hyperlink (so the whole paragraph doesn't become a
+        # link); fall back to the very first node if every node is a hyperlink.
+        carrier = next((t for t in tnodes if not _in_hyperlink(t)), tnodes[0])
+        carrier.text = tr[k]
+        carrier.set(space, "preserve")  # keep leading/trailing spaces Word would otherwise trim
+        for t in tnodes:
+            if t is not carrier:
+                t.text = ""
 
     report["failedBlocks"] = len(failed)
     report["failedPages"] = len(failed)
