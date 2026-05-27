@@ -1,0 +1,47 @@
+# Python tooling for the BhashAI parser-service and any future Python code in this repo.
+# Ruff is the single source for lint + format (replaces flake8 + black + isort).
+#
+# Usage:
+#   pnpm lint:py        # ruff check . + ruff format --check .
+#   pnpm format:py      # ruff format . (apply)
+#   cd services/parser && pytest
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = [
+    ".venv",
+    ".venv-modal",
+    "services/parser/.venv",
+    "services/indictrans/.venv",
+    "services/sarvam/__pycache__",
+    "services/parser/__pycache__",
+    "**/dist",
+    "**/.next",
+    "**/node_modules",
+]
+
+[tool.ruff.lint]
+# E/W = pycodestyle, F = pyflakes, I = isort, B = flake8-bugbear,
+# UP = pyupgrade, SIM = flake8-simplify, RUF = ruff-specific
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    "E501",  # line-too-long: most overruns are deliberate prompt strings or URL constants
+    "B008",  # function-call-in-default-argument: FastAPI uses this idiom
+    "SIM117", # multiple-with statements: combining can hurt readability
+    "B904",  # raise-from inside except: noisy on idiomatic raise/HTTPException
+]
+
+[tool.ruff.lint.per-file-ignores]
+"services/parser/scripts/*.py" = ["T201"]  # print() is fine in CLI scripts
+"services/parser/glossaries/*.py" = ["INP001"]  # data dir, not a package
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.pytest.ini_options]
+testpaths = ["services/parser/tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"

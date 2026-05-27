@@ -1,0 +1,15 @@
+node_modules
+dist
+.next
+.turbo
+out
+coverage
+*.tsbuildinfo
+pnpm-lock.yaml
+.venv-modal
+.gstack
+services/**/.venv
+services/parser/__pycache__
+services/sarvam/__pycache__
+samples/out
+.data
