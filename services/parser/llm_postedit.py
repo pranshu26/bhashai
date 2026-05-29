@@ -66,25 +66,44 @@ def _provider_cfg():
     return (None, None, None, None)
 
 
+def _provider_list():
+    """Translation providers in priority order. Primary = LLM_* (via _provider_cfg). Optional
+    secondary = LLM2_* (any OpenAI-compatible endpoint, e.g. Groq). With two providers, chunks
+    are load-split across both and a failed chunk fails over to the other — so a paragraph only
+    drops to English if EVERY provider fails it, and neither provider sees the full request rate."""
+    provs = []
+    kind, key, model, base = _provider_cfg()
+    if kind:
+        provs.append({"kind": kind, "key": key, "model": model, "base": base})
+    b2 = os.environ.get("LLM2_BASE_URL")
+    if b2 and os.environ.get("LLM2_API_KEY"):
+        provs.append({"kind": "openai", "key": os.environ["LLM2_API_KEY"],
+                      "model": os.environ.get("LLM2_MODEL", "llama-3.3-70b-versatile"),
+                      "base": b2.rstrip("/")})
+    return provs
+
+
 def is_enabled() -> bool:
     return _provider_cfg()[0] is not None
 
 
-def _http_json(url, body, headers, timeout):
-    """POST JSON with retry/backoff on rate-limit (429) / 5xx. Adds a real User-Agent."""
+def _http_json(url, body, headers, timeout, retries=5):
+    """POST JSON with retry/backoff on rate-limit (429) / 5xx. Adds a real User-Agent.
+    `retries` = total attempts; set to 1 for fast fail-over when a fallback provider exists."""
     headers = {**headers, "user-agent": _UA}
-    for attempt in range(5):
+    retries = max(1, retries)
+    for attempt in range(retries):
         try:
             req = urllib.request.Request(url, data=body, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as ex:
-            if ex.code in (429, 500, 502, 503, 504) and attempt < 4:
+            if ex.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
                 time.sleep(min(20.0, 1.5 * (2 ** attempt)) + random.random())
                 continue
             raise
         except Exception:  # noqa: BLE001 -- transient network
-            if attempt < 4:
+            if attempt < retries - 1:
                 time.sleep(1.0 + random.random())
                 continue
             raise
@@ -107,17 +126,17 @@ def warmup() -> None:
         pass
 
 
-def _call_llm(system: str, user: str, kind: str, key: str, model: str, base_url: str, max_tokens: int = 4096) -> str:
+def _call_llm(system: str, user: str, kind: str, key: str, model: str, base_url: str, max_tokens: int = 4096, retries: int = 5) -> str:
     if kind == "anthropic":
         body = json.dumps({
             "model": model, "max_tokens": max_tokens, "temperature": 0.2,
             "system": system, "messages": [{"role": "user", "content": user}],
         }).encode()
         d = _http_json("https://api.anthropic.com/v1/messages", body,
-                       {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, 120)
+                       {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, 120, retries=retries)
         return "".join(c.get("text", "") for c in d["content"] if c.get("type") == "text")
 
-    # OpenAI-compatible: Groq / OpenAI / self-hosted vLLM.
+    # OpenAI-compatible: Groq / OpenAI / Gemini / self-hosted vLLM.
     payload = {
         "model": model, "max_tokens": max_tokens, "temperature": 0.2,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -127,7 +146,7 @@ def _call_llm(system: str, user: str, kind: str, key: str, model: str, base_url:
     elif "api.sarvam.ai" in base_url:
         payload["reasoning_effort"] = "low"
     d = _http_json(base_url.rstrip("/") + "/chat/completions", json.dumps(payload).encode(),
-                   {"authorization": f"Bearer {key}", "content-type": "application/json"}, 180)
+                   {"authorization": f"Bearer {key}", "content-type": "application/json"}, 180, retries=retries)
     return d["choices"][0]["message"].get("content") or ""
 
 
@@ -189,10 +208,12 @@ def post_edit_batch(pairs, target_code, batch_size=12, max_workers=None):
 
 def translate_batch(texts, target_code, batch_size=6, max_workers=None):
     """Translate English `texts` -> target language directly via the chat LLM. Returns
-    (translations, failed_index_set, last_err). On a batch count-mismatch it retries each item
-    individually so paragraphs never silently fall back to English."""
-    kind, key, model, base_url = _provider_cfg()
-    if kind is None or not texts:
+    (translations, failed_index_set, last_err). Chunks round-robin across providers (LLM_* plus
+    optional LLM2_*); a chunk that errors/429s on one provider fails over to the next, so it only
+    drops to English if EVERY provider fails it. Splitting load also keeps each provider under its
+    own rate limit. With a single provider this behaves exactly as before."""
+    provs = _provider_list()
+    if not provs or not texts:
         return list(texts), (set(range(len(texts))) if texts else set()), None
     if max_workers is None:
         max_workers = int(os.environ.get("POST_EDIT_CONCURRENCY", "6"))
@@ -213,8 +234,8 @@ def translate_batch(texts, target_code, batch_size=6, max_workers=None):
     chunks = [(i, texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)]
     last_err = {"v": None}
 
-    def _try_chunk(chunk):
-        """Returns a list of len(chunk) translations, or None on error/count-mismatch."""
+    def _try_chunk(chunk, prov, retries):
+        """One provider attempt: list of len(chunk) translations, or None on error/count-mismatch."""
         items = [{"n": j + 1, "text": t} for j, t in enumerate(chunk)]
         user = (
             f"Translate these {len(chunk)} lines to {lang}. Return a JSON array of EXACTLY "
@@ -222,7 +243,8 @@ def translate_batch(texts, target_code, batch_size=6, max_workers=None):
             f"omit items.\n" + json.dumps(items, ensure_ascii=False)
         )
         try:
-            raw = _call_llm(system, user, kind, key, model, base_url, max_tokens=8000).strip()
+            raw = _call_llm(system, user, prov["kind"], prov["key"], prov["model"], prov["base"],
+                            max_tokens=8000, retries=retries).strip()
             s, e = raw.find("["), raw.rfind("]")
             arr = json.loads(raw[s : e + 1]) if s >= 0 and e > s else None
             if isinstance(arr, list) and len(arr) == len(chunk):
@@ -231,29 +253,43 @@ def translate_batch(texts, target_code, batch_size=6, max_workers=None):
             last_err["v"] = str(ex)
         return None
 
+    n_prov = len(provs)
+
+    def _chunk_any(chunk, rot, retries_each):
+        """Try providers in rotated order (load-split), failing over on None. Each provider gets
+        `retries_each` attempts; with a fallback available we keep this small so a throttled
+        provider hands off fast instead of burning long backoffs (and never hangs the worker)."""
+        order = [provs[(rot + k) % n_prov] for k in range(n_prov)]
+        for prov in order:
+            got = _try_chunk(chunk, prov, retries_each)
+            if got is not None:
+                return got
+        return None
+
     def _do(item):
-        start, chunk = item
-        got = _try_chunk(chunk)
+        ci, (start, chunk) = item
+        got = _chunk_any(chunk, ci, 5 if n_prov == 1 else 2)
         if got is not None:
             return (start, got, [True] * len(chunk))
         if len(chunk) == 1:
-            return (start, [chunk[0]], [False])  # single item failed -> keep source
-        # batch count-mismatch/error -> translate each item ALONE (guarantees completeness)
+            return (start, [chunk[0]], [False])  # all providers failed -> keep source
+        # batch failed everywhere -> translate each item ALONE (fast, still rotating providers)
         vals, oks = [], []
-        for c in chunk:
-            one = _try_chunk([c])
+        for j, c in enumerate(chunk):
+            one = _chunk_any([c], ci + j, 5 if n_prov == 1 else 1)
             if one is not None:
                 vals.append(one[0]); oks.append(True)
             else:
                 vals.append(c); oks.append(False)
         return (start, vals, oks)
 
+    items = list(enumerate(chunks))
     if len(chunks) <= 1:
-        results = [_do(chunks[0])] if chunks else []
+        results = [_do(items[0])] if chunks else []
     else:
         workers = max(1, min(max_workers, len(chunks)))
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(_do, chunks))
+            results = list(ex.map(_do, items))
 
     out = list(texts)
     failed: set = set()
